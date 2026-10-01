@@ -5,8 +5,10 @@
 # omarchy-launch-floating-terminal-with-presentation.
 #
 # Nothing changes until you confirm. Every command is printed before it runs.
-# The package comes from the AUR through Omarchy's own helper; nothing is
-# downloaded or built by this script itself.
+# The only download is the TypeSuggest binary for this plugin version, built
+# from the source in typesuggest/ by .github/workflows/release.yml. It is
+# installed only if its SHA-256 matches the value committed in
+# release/typesuggest-x86_64.sha256. Nothing downloaded is run by a shell.
 
 set -euo pipefail
 
@@ -15,6 +17,12 @@ dim=$'\033[2m'
 red=$'\033[31m'
 green=$'\033[32m'
 reset=$'\033[0m'
+
+plugin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+version="$(jq -r '.version' "$plugin_dir/manifest.json")"
+expected_sha="$(cut -d' ' -f1 "$plugin_dir/release/typesuggest-x86_64.sha256" 2>/dev/null || true)"
+url="https://github.com/AbdulrahmanHR/omarchy-typesuggest/releases/download/v$version/typesuggest-x86_64"
+target="$HOME/.local/bin/typesuggest"
 
 run() {
   printf '%s$ %s%s\n' "$dim" "$*" "$reset"
@@ -27,6 +35,7 @@ step() {
 
 fail() {
   printf '\n%s%s%s\n' "$red" "$*" "$reset" >&2
+  read -r -p "Press Enter to close. " _ || true
   exit 1
 }
 
@@ -40,22 +49,14 @@ confirm() {
   fi
 }
 
-undo_help() {
-  cat <<'EOF'
-To undo this later:
-  systemctl --user stop typesuggest
-  typesuggest --disable-autostart
-  omarchy-pkg-drop typesuggest
-  systemctl --user enable --now omarchy-fcitx5.service
-EOF
-}
-
-cat <<'EOF'
+cat <<EOF
 TypeSuggest shows Windows-style word suggestions at the text cursor while
-you type. This sets it up in three steps:
+you type. This sets up version $version in three steps:
 
-  1. Install the AUR package "typesuggest"
-       omarchy-pkg-aur-add typesuggest
+  1. Download the TypeSuggest program, check it and install it
+       $url
+       SHA-256 must be $expected_sha
+       installed to $target
 
   2. Turn off Fcitx5. Only one input method can run at a time, and Omarchy
      starts Fcitx5 by default. Fcitx5 also handles Omarchy's CapsLock compose
@@ -64,33 +65,45 @@ you type. This sets it up in three steps:
 
   3. Start TypeSuggest now and on every login
        typesuggest --enable-autostart
-       systemctl --user start typesuggest
+       systemctl --user restart typesuggest
+
+To undo it later, run:
+  $plugin_dir/scripts/uninstall-typesuggest.sh
 
 EOF
-undo_help
-echo
 
 if ! confirm "Set up TypeSuggest now?"; then
   echo "Nothing was changed."
   exit 0
 fi
 
-command -v omarchy-pkg-aur-add >/dev/null 2>&1 \
-  || fail "omarchy-pkg-aur-add was not found. This script needs Omarchy."
+[[ $(uname -m) == x86_64 ]] ||
+  fail "Prebuilt TypeSuggest is x86_64 only. Build it from source instead: see $plugin_dir/typesuggest/README.md"
+[[ $expected_sha =~ ^[0-9a-f]{64}$ ]] ||
+  fail "This plugin version has no pinned checksum (release/typesuggest-x86_64.sha256). Nothing was changed."
 
-step "1/3 Installing the typesuggest package"
-run omarchy-pkg-aur-add typesuggest || fail "The package did not install. Nothing else was changed."
+step "1/3 Downloading TypeSuggest $version"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+run curl -fL --proto '=https' --tlsv1.2 -o "$tmp/typesuggest" "$url" ||
+  fail "The download failed. Nothing was changed."
+actual_sha="$(sha256sum "$tmp/typesuggest" | cut -d' ' -f1)"
+[[ $actual_sha == "$expected_sha" ]] ||
+  fail "Checksum mismatch (got $actual_sha). Refusing to install; nothing was changed."
+echo "Checksum OK."
+run install -Dm755 "$tmp/typesuggest" "$target"
 
 step "2/3 Turning off Fcitx5"
-if systemctl --user cat omarchy-fcitx5.service >/dev/null 2>&1; then
+if systemctl --user is-enabled --quiet omarchy-fcitx5.service 2>/dev/null ||
+  systemctl --user is-active --quiet omarchy-fcitx5.service 2>/dev/null; then
   run systemctl --user disable --now omarchy-fcitx5.service
 else
-  echo "omarchy-fcitx5.service is not installed; nothing to turn off."
+  echo "Fcitx5 is not running; nothing to turn off."
 fi
 
 step "3/3 Starting TypeSuggest"
-run typesuggest --enable-autostart
-run systemctl --user start typesuggest
+run "$target" --enable-autostart
+run systemctl --user restart typesuggest
 
 sleep 2
 if systemctl --user is-active --quiet typesuggest; then
@@ -100,11 +113,11 @@ else
   echo "If it says \"Input method unavailable\", another input method is still running."
 fi
 
-cat <<'EOF'
+cat <<EOF
 
 Some apps need one extra setting before suggestions show up (Chromium and
-Electron apps, Qt apps on Omarchy); see the TypeSuggest README:
-  https://github.com/AbdulrahmanHR/typesuggest#-app-compatibility
+Electron apps, Qt apps on Omarchy); see "App Compatibility" in
+  $plugin_dir/typesuggest/README.md
 
 EOF
-undo_help
+read -r -p "Press Enter to close. " _ || true

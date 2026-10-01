@@ -1,0 +1,20 @@
+[package]
+name = "typesuggest"
+version = "1.0.0"
+edition = "2024"
+authors = ["Abdulrahman Rahmouni <AbdulrahmanHR@users.noreply.github.com>"]
+description = "Native Windows-style hardware keyboard text suggestions for Linux on Wayland"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/AbdulrahmanHR/typesuggest"
+keywords = ["wayland", "text-suggestions", "ime", "hyprland", "autocomplete"]
+categories = ["command-line-utilities", "gui"]
+
+[dependencies]
+fontdue = "0.9.4"
+rustix = { version = "1.1.5", features = ["fs", "shm", "termios", "process"] }
+tiny-skia = "0.12.0"
+wayland-client = { version = "0.31.15", features = ["dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
+xkbcommon = "0.9.0"

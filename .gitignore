@@ -9,3 +9,6 @@
 *.qmlc
 *.jsc
 .qmlls.ini
+
+# Rust build output
+typesuggest/target/

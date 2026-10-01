@@ -1,9 +1,9 @@
 # TypeSuggest for Omarchy
 
 An [Omarchy](https://omarchy.org) 4 (Quattro) shell plugin for
-[TypeSuggest](https://github.com/AbdulrahmanHR/typesuggest), the Wayland input
-method that shows Windows-style word suggestions at the text cursor while you
-type.
+[TypeSuggest](typesuggest/README.md), the Wayland input method that shows
+Windows-style word suggestions at the text cursor while you type. The
+TypeSuggest source lives in this repository too, in [`typesuggest/`](typesuggest/).
 
 It adds a keyboard icon to the Omarchy bar. The icon is dimmed while
 TypeSuggest is off, and its tooltip says whether it is on. Clicking it opens a
@@ -29,26 +29,26 @@ If TypeSuggest is not installed, the panel explains what it is and offers an
 
 - Omarchy 4 (Quattro), with the default `omarchy.bar` (or another bar that
   hosts bar widgets).
-- TypeSuggest, from the AUR package
-  [`typesuggest`](https://aur.archlinux.org/packages/typesuggest). The quick
-  settings need a build whose `typesuggest --help` lists `--config-json` and
-  `--set`; with an older build the panel still has the on/off switch, but asks
-  you to update before it shows the settings. The panel can install
-  TypeSuggest for you.
+- TypeSuggest itself. The panel's **Install TypeSuggest** button sets it up
+  (see [below](#what-the-install-button-does)), or build it from
+  [`typesuggest/`](typesuggest/README.md). The quick settings need a build
+  whose `typesuggest --help` lists `--config-json` and `--set` (1.0.0 and
+  later); with an older build the panel still has the on/off switch, but asks
+  you to update before it shows the settings.
 
 ### External dependencies
 
-The plugin itself is QML only. It runs these programs, all of which Omarchy
-already ships except TypeSuggest itself:
+The plugin itself is QML only and makes no network connections. It runs these
+programs, all of which Omarchy already ships except TypeSuggest itself:
 
 | Program | Used for |
 |---|---|
-| `typesuggest` (AUR package `typesuggest`) | Reading and changing settings, autostart, clearing learned phrases |
+| `typesuggest` (installed to `~/.local/bin` by the Install button) | Reading and changing settings, autostart, clearing learned phrases |
 | `systemctl` (systemd user session) | Service state, start and stop |
 | `sh` | The installed check (`command -v typesuggest`) |
 | `omarchy-launch-config-editor` | **Open config file** |
 | `omarchy-launch-floating-terminal-with-presentation`, `bash` | **Install TypeSuggest** |
-| `omarchy-pkg-aur-add` (uses `yay`), `gum` | Inside the install script |
+| `curl`, `sha256sum`, `jq`, `install`, `gum` | Inside the install script |
 
 ## Install
 
@@ -111,23 +111,29 @@ It opens a floating Omarchy terminal running
 first prints every step and how to undo it, and changes nothing unless you
 confirm. Then it:
 
-1. Installs the AUR package: `omarchy-pkg-aur-add typesuggest`. This builds
-   the package with `yay` and asks for your password to install it.
+1. Downloads the TypeSuggest binary for this plugin version from this
+   repository's GitHub release (`typesuggest-x86_64`, built and tested from
+   [`typesuggest/`](typesuggest/) by the
+   [Release workflow](.github/workflows/release.yml)) and **installs it only
+   if its SHA-256 matches** the value committed in
+   [`release/typesuggest-x86_64.sha256`](release/typesuggest-x86_64.sha256).
+   It goes to `~/.local/bin/typesuggest`; no root access is needed.
 2. Turns off Fcitx5: `systemctl --user disable --now omarchy-fcitx5.service`.
    Only one input method can run at a time, and Omarchy starts Fcitx5 by
    default. Fcitx5 also provides Omarchy's CapsLock compose sequences
    (`~/.XCompose`), which stop working while it is off.
 3. Starts TypeSuggest and enables it on login:
-   `typesuggest --enable-autostart`, then `systemctl --user start typesuggest`.
+   `typesuggest --enable-autostart`, then `systemctl --user restart typesuggest`.
 
-It stops at the first failed step. It never downloads and runs anything
-itself, and it does not touch your Omarchy or shell configuration.
+It stops at the first failed step. The binary is the only download, nothing is
+piped into a shell, and your Omarchy and shell configuration are not touched.
+Prebuilt binaries are x86_64 only; on other machines build from source.
 
 Some apps need one extra setting before suggestions appear (Chromium and
 Electron apps need `--enable-wayland-ime`; Qt apps on Omarchy need
 `QT_IM_MODULE=wayland`). See
-[App compatibility](https://github.com/AbdulrahmanHR/typesuggest#-app-compatibility)
-in the TypeSuggest README.
+[App compatibility](typesuggest/README.md#-app-compatibility) in the
+TypeSuggest README.
 
 ## Remove
 
@@ -137,20 +143,38 @@ Remove the plugin:
 omarchy plugin remove io.github.abdulrahmanhr.typesuggest
 ```
 
-Remove TypeSuggest itself and bring Fcitx5 back:
+Remove TypeSuggest itself with
+[`scripts/uninstall-typesuggest.sh`](scripts/uninstall-typesuggest.sh) (run it
+from the plugin folder, `~/.config/omarchy/plugins/io.github.abdulrahmanhr.typesuggest/`
+before removing the plugin). It stops the service, deletes the program, and asks
+before turning Fcitx5 back on and before deleting your settings and learned
+phrases. By hand:
 
 ```bash
-systemctl --user stop typesuggest
-typesuggest --disable-autostart
-omarchy-pkg-drop typesuggest          # or: yay -R typesuggest
+systemctl --user disable --now typesuggest
+rm -f ~/.local/bin/typesuggest ~/.config/systemd/user/typesuggest.service
 systemctl --user enable --now omarchy-fcitx5.service
 rm -rf ~/.config/typesuggest          # optional: settings and learned phrases
 ```
 
 ## Privacy
 
-The plugin never sees what you type. It only runs the commands listed above,
-reads the settings TypeSuggest prints, and makes no network connections.
+The plugin never sees what you type. It only runs the commands listed above
+and reads the settings TypeSuggest prints; the only network access is the
+binary download in the install script, when you confirm it. TypeSuggest itself
+sees every key you press, as any input method must; see
+[Privacy & Security](typesuggest/README.md#-privacy--security) for what it
+stores and how it detects password prompts.
+
+## What is in this repository
+
+| Path | What it is |
+|---|---|
+| `manifest.json`, `Panel.qml`, `Service.qml`, `Model.js` | The Omarchy plugin (bar icon and panel) |
+| `scripts/` | Install and uninstall scripts used by the panel |
+| `typesuggest/` | TypeSuggest source code (Rust) |
+| `.github/workflows/release.yml` | Builds and tests `typesuggest/` in an Arch Linux container on every `v*` tag and publishes the binary with its SHA-256 |
+| `release/typesuggest-x86_64.sha256` | The checksum the install script requires, committed after the release build |
 
 ## License
 

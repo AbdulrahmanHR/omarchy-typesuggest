@@ -1,0 +1,64 @@
+# Builds the TypeSuggest binary from the tagged source and publishes it as a release.
+# The plugin's install script only accepts a download whose SHA-256 matches the value
+# committed in release/typesuggest-x86_64.sha256.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Built on Arch, the base of Omarchy, so the binary matches the libraries users have
+    container: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm --needed rust libxkbcommon ttf-liberation binutils git
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test
+        working-directory: typesuggest
+        run: cargo test --locked --release
+
+      - name: Build
+        working-directory: typesuggest
+        run: cargo build --locked --release
+
+      - name: Package
+        run: |
+          mkdir dist
+          install -Dm755 typesuggest/target/release/typesuggest dist/typesuggest-x86_64
+          strip dist/typesuggest-x86_64
+          cd dist
+          sha256sum typesuggest-x86_64 > typesuggest-x86_64.sha256
+          cat typesuggest-x86_64.sha256
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: typesuggest-x86_64
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: typesuggest-x86_64
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "TypeSuggest $GITHUB_REF_NAME" \
+            --notes "Prebuilt x86_64 binary, built and tested by the Release workflow from the source at this tag. SHA-256: $(cut -d' ' -f1 dist/typesuggest-x86_64.sha256)"

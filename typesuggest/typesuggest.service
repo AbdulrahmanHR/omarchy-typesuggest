@@ -1,0 +1,20 @@
+[Unit]
+Description=TypeSuggest - Windows-style hardware text suggestions
+After=graphical-session.target
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/typesuggest
+Restart=always
+RestartSec=2
+# Exit status 3: another input method (such as Fcitx5) holds the seat; retrying cannot help
+RestartPreventExitStatus=3
+# Every keystroke passes through this process: no core dumps, no privilege gain, local sockets only
+LimitCORE=0
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=graphical-session.target
