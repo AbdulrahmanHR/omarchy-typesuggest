@@ -1,0 +1,11 @@
+# Editor and OS clutter
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# qmllint / Qt Creator output
+*.qmlc
+*.jsc
+.qmlls.ini

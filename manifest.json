@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.abdulrahmanhr.typesuggest",
+  "name": "TypeSuggest",
+  "version": "0.1.0",
+  "author": "Abdulrahman Rahmouni",
+  "license": "MIT",
+  "description": "Windows-style word suggestions while you type, with quick settings in the bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "TypeSuggest",
+    "description": "Turn TypeSuggest on or off and change its suggestion bar: position, size, suggestions, accept keys, learning and typo correction.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 30
+      }
+    ]
+  }
+}
