@@ -565,6 +565,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4b. Load English contextual bigram model (232,000 pairs embedded)
     let embedded_bigrams = include_str!("../data/bigrams.tsv");
     dict.load_bigrams_tsv(embedded_bigrams);
+    // The embedded data splits contractions ("don" + "'t"); restore them
+    dict.add_english_contractions();
 
     // 5. Load user custom words from ~/.config/typesuggest/words.txt if it exists
     let user_words_path = app_config_dir.join("words.txt");

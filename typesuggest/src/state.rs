@@ -63,7 +63,8 @@ pub enum KeyAction {
 }
 
 pub fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '\''
+    // ’ is the apostrophe apps with typographic quotes insert
+    c.is_alphanumeric() || c == '\'' || c == '\u{2019}'
 }
 
 pub fn extract_word_prefix(before_cursor: &str) -> &str {
@@ -127,7 +128,10 @@ pub fn extract_prev_word_from_slice(before_word: &str) -> Option<String> {
     }
 
     if word_start < word_end {
-        let word = before_word[word_start..word_end].trim().to_lowercase();
+        let word = before_word[word_start..word_end]
+            .trim()
+            .to_lowercase()
+            .replace('\u{2019}', "'");
         if word.chars().count() >= 2 && word.chars().all(|c| c.is_alphabetic() || c == '\'') {
             return Some(word);
         }
@@ -1426,6 +1430,32 @@ mod tests {
         // Backspace to 'p' (len 1 < 2) -> hides suggestions
         let act = sm.handle_key_press(0xff08, None, false, &dict);
         assert_eq!(act, KeyAction::HideSuggestions);
+    }
+
+    #[test]
+    fn test_apostrophe_continues_the_word() {
+        let mut dict = Dictionary::from_frequency_text("don 900\ndone 800\nknow 500");
+        dict.add_english_contractions();
+        let mut sm = StateMachine::new(3);
+        for c in "don'".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        let (prefix, _) = sm.buffer.current_word_prefix_and_prev();
+        assert_eq!(prefix, "don'");
+        assert!(
+            matches!(&sm.mode, InputMode::Suggesting { candidates, .. } if candidates[0] == "don't")
+        );
+
+        // Apps with typographic quotes report ’ in the surrounding text
+        let text = "I don\u{2019}";
+        let act = sm.handle_surrounding_text(text, text.len(), text.len(), &dict);
+        assert!(
+            matches!(act, KeyAction::ShowSuggestions { ref candidates, .. } if candidates[0] == "don't")
+        );
+        assert_eq!(
+            extract_prev_word_from_slice("don\u{2019}t "),
+            Some("don't".to_string())
+        );
     }
 
     #[test]

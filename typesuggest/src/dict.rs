@@ -70,7 +70,7 @@ impl Dictionary {
             let mut parts = line.split_whitespace();
             if let (Some(word_str), Some(freq_str)) = (parts.next(), parts.next()) {
                 let clean_word = word_str.trim().to_lowercase();
-                if clean_word.starts_with('\'') || clean_word.len() < 2 {
+                if !is_dictionary_word(&clean_word) {
                     continue;
                 }
                 if let Ok(freq) = freq_str.parse::<u64>() {
@@ -168,6 +168,98 @@ impl Dictionary {
         }
     }
 
+    /// Add English contractions (don't, I'm, it's, ...) and drop the split halves and
+    /// apostrophe-less spellings of them, in the vocabulary and the bigram model. The embedded word
+    /// list was built from text where "don't" was split into "don" + "'t", so it holds no word with
+    /// an apostrophe; call this after loading the embedded list and bigrams.
+    pub fn add_english_contractions(&mut self) {
+        let spellings: HashMap<&str, &str> = CONTRACTION_SPELLINGS.iter().copied().collect();
+        for spelling in spellings.keys() {
+            self.set_word_frequency(spelling, None);
+        }
+        // "don" in the source text is almost always the first half of "don't"
+        if self.is_known_word("don") {
+            self.set_word_frequency("don", Some(RARE_WORD_FREQUENCY));
+        }
+        for &(word, frequency) in CONTRACTIONS {
+            self.insert(word, frequency);
+        }
+
+        // The bigram data comes from another corpus, where contractions mostly vanished in
+        // tokenization and only their rare apostrophe-less spellings remain ("you dont"). Scale
+        // those up by how much rarer the spellings are there than the contractions are in the
+        // word list; the median over all contractions keeps rare spellings from skewing it.
+        let unigram_total: f64 = self.words.iter().map(|w| w.frequency as f64).sum();
+        let mut as_follower: HashMap<&str, f64> = HashMap::new();
+        let mut bigram_total = 0.0;
+        for followers in self.bigrams.values() {
+            for (follower, count) in followers {
+                bigram_total += f64::from(*count);
+                if let Some((spelling, _)) = spellings.get_key_value(follower.as_str()) {
+                    *as_follower.entry(spelling).or_default() += f64::from(*count);
+                }
+            }
+        }
+        let mut factors: Vec<f64> = as_follower
+            .iter()
+            .filter_map(|(spelling, seen)| {
+                let contraction = spellings[spelling];
+                let frequency = CONTRACTIONS.iter().find(|(c, _)| *c == contraction)?.1 as f64;
+                Some((frequency / unigram_total) / (seen / bigram_total))
+            })
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .collect();
+        factors.sort_by(f64::total_cmp);
+        let scale = factors
+            .get(factors.len() / 2)
+            .copied()
+            .unwrap_or(1.0)
+            .max(1.0);
+
+        // Re-key the bigram model on the contractions, merging counts, keeping followers sorted
+        let canonical = |w: &str| {
+            spellings
+                .get(w)
+                .map_or_else(|| w.to_string(), |c| c.to_string())
+        };
+        let mut merged: HashMap<String, HashMap<String, u32>> = HashMap::new();
+        for (leader, followers) in self.bigrams.drain() {
+            let entry = merged.entry(canonical(&leader)).or_default();
+            for (follower, count) in followers {
+                let count = if spellings.contains_key(follower.as_str()) {
+                    (f64::from(count) * scale).min(f64::from(u32::MAX)) as u32
+                } else {
+                    count
+                };
+                let slot = entry.entry(canonical(&follower)).or_default();
+                *slot = slot.saturating_add(count);
+            }
+        }
+        self.bigrams = merged
+            .into_iter()
+            .map(|(leader, followers)| {
+                let mut followers: Vec<(String, u32)> = followers.into_iter().collect();
+                followers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                (leader, followers)
+            })
+            .collect();
+
+        self.rebuild_caches();
+    }
+
+    /// Set a word's frequency, or remove it from the vocabulary with `None`
+    fn set_word_frequency(&mut self, word: &str, frequency: Option<u64>) {
+        let mut node = &mut self.root;
+        for ch in word.chars() {
+            match node.children.get_mut(&ch) {
+                Some(next) => node = next,
+                None => return,
+            }
+        }
+        node.is_word = frequency.is_some();
+        node.frequency = frequency.unwrap_or(0);
+    }
+
     /// Whether `word` (lowercase) is in the vocabulary, including the user's custom words
     pub fn is_known_word(&self, word: &str) -> bool {
         let mut node = &self.root;
@@ -252,7 +344,8 @@ impl Dictionary {
             .map(|c| c.is_uppercase())
             .unwrap_or(false);
 
-        let lower_prefix = prefix.to_lowercase();
+        // Apps that auto-insert typographic quotes type ’ for '
+        let lower_prefix = prefix.to_lowercase().replace('\u{2019}', "'");
         let mut results = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
@@ -333,7 +426,7 @@ impl Dictionary {
             .map(|cand| {
                 if is_all_caps {
                     cand.to_uppercase()
-                } else if is_capitalized {
+                } else if is_capitalized || cand == "i" || cand.starts_with("i'") {
                     let mut chars = cand.chars();
                     match chars.next() {
                         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
@@ -437,6 +530,140 @@ impl Dictionary {
     }
 }
 
+/// Frequency given to a word that only looks common because it is half of a split contraction
+const RARE_WORD_FREQUENCY: u64 = 20_000;
+
+/// English contractions and their frequencies, estimated from the embedded list's own counts.
+/// That list was built from text where contractions were split ("don't" = "don" + "'t"):
+/// - n't forms whose first half is not a word (didn, isn, ...): the count of that half
+/// - can't and won't: the rest of the "'t" count, in the ratio of their apostrophe-less spellings
+/// - I'm: the whole "'m" count
+/// - others: the apostrophe-less spelling's count times the list's typical ratio of about 720
+///   correct uses per apostrophe-less one, or a share of the "'s" / "'re" / "'ll" / "'ve" / "'d"
+///   counts where that spelling is itself a word (its, ill, well, ...)
+/// - y'all, o'clock, ma'am: the counts of "'all", "'clock", "'am"
+const CONTRACTIONS: &[(&str, u64)] = &[
+    ("don't", 4_158_644),
+    ("didn't", 1_100_643),
+    ("doesn't", 471_037),
+    ("isn't", 429_536),
+    ("wasn't", 312_240),
+    ("wouldn't", 288_422),
+    ("haven't", 258_463),
+    ("couldn't", 233_368),
+    ("aren't", 178_286),
+    ("ain't", 166_551),
+    ("shouldn't", 117_029),
+    ("weren't", 88_427),
+    ("hasn't", 70_449),
+    ("hadn't", 44_545),
+    ("mustn't", 17_276),
+    ("needn't", 5_234),
+    ("can't", 875_213),
+    ("won't", 813_607),
+    ("shan't", 5_000),
+    ("i'm", 4_386_306),
+    ("it's", 3_500_000),
+    ("that's", 2_783_520),
+    ("what's", 1_792_800),
+    ("let's", 900_000),
+    ("he's", 831_600),
+    ("there's", 713_520),
+    ("she's", 471_600),
+    ("who's", 300_000),
+    ("where's", 131_760),
+    ("here's", 117_360),
+    ("how's", 100_000),
+    ("you're", 1_110_240),
+    ("we're", 1_000_000),
+    ("they're", 339_120),
+    ("i'll", 1_300_000),
+    ("we'll", 450_000),
+    ("you'll", 280_800),
+    ("it'll", 200_000),
+    ("he'll", 200_000),
+    ("they'll", 180_000),
+    ("she'll", 100_000),
+    ("that'll", 100_000),
+    ("there'll", 20_000),
+    ("who'll", 15_000),
+    ("i've", 714_960),
+    ("we've", 300_000),
+    ("you've", 275_040),
+    ("they've", 150_000),
+    ("would've", 80_000),
+    ("could've", 60_000),
+    ("should've", 60_000),
+    ("must've", 40_000),
+    ("might've", 20_000),
+    ("i'd", 400_000),
+    ("you'd", 200_000),
+    ("he'd", 100_000),
+    ("we'd", 100_000),
+    ("they'd", 80_000),
+    ("she'd", 60_000),
+    ("that'd", 40_000),
+    ("it'd", 30_000),
+    ("who'd", 20_000),
+    ("there'd", 10_000),
+    ("ma'am", 76_751),
+    ("y'all", 30_283),
+    ("o'clock", 22_311),
+];
+
+/// Words in the embedded list that are only the first half of a split contraction, or a
+/// spelling of one without its apostrophe, and the contraction they stand for. Spellings that
+/// are also real words (its, lets, ill, well, were, wed, hell, shell, id) are kept.
+const CONTRACTION_SPELLINGS: &[(&str, &str)] = &[
+    ("didn", "didn't"),
+    ("doesn", "doesn't"),
+    ("isn", "isn't"),
+    ("wasn", "wasn't"),
+    ("aren", "aren't"),
+    ("weren", "weren't"),
+    ("haven", "haven't"),
+    ("hasn", "hasn't"),
+    ("hadn", "hadn't"),
+    ("couldn", "couldn't"),
+    ("wouldn", "wouldn't"),
+    ("shouldn", "shouldn't"),
+    ("mustn", "mustn't"),
+    ("needn", "needn't"),
+    ("ain", "ain't"),
+    ("dont", "don't"),
+    ("cant", "can't"),
+    ("wont", "won't"),
+    ("didnt", "didn't"),
+    ("doesnt", "doesn't"),
+    ("isnt", "isn't"),
+    ("wasnt", "wasn't"),
+    ("arent", "aren't"),
+    ("werent", "weren't"),
+    ("havent", "haven't"),
+    ("hasnt", "hasn't"),
+    ("hadnt", "hadn't"),
+    ("couldnt", "couldn't"),
+    ("wouldnt", "wouldn't"),
+    ("shouldnt", "shouldn't"),
+    ("aint", "ain't"),
+    ("im", "i'm"),
+    ("ive", "i've"),
+    ("youre", "you're"),
+    ("youve", "you've"),
+    ("youll", "you'll"),
+    ("theyre", "they're"),
+    ("theyve", "they've"),
+    ("theyll", "they'll"),
+    ("thats", "that's"),
+    ("whats", "what's"),
+    ("hes", "he's"),
+    ("shes", "she's"),
+    ("theres", "there's"),
+    ("heres", "here's"),
+    ("wheres", "where's"),
+    ("whos", "who's"),
+];
+
 /// One of 128 bits standing for `c`. ASCII letters get their own bit; other characters share
 /// bits, which only weakens the "letter is missing" bound, never breaks it.
 fn letter_bit(c: char) -> u128 {
@@ -446,6 +673,21 @@ fn letter_bit(c: char) -> u128 {
 /// Bit set of the characters in `word` (see [`letter_bit`])
 fn letter_bits(word: &str) -> u128 {
     word.chars().fold(0, |set, c| set | letter_bit(c))
+}
+
+/// A word worth suggesting from the frequency list: letters, with apostrophes or hyphens only
+/// between letters (good-bye, o'clock). Leaves out contraction halves ('t, 's), backtick
+/// variants (don`t), stutter fragments (i-), abbreviations with dots and anything with digits.
+fn is_dictionary_word(word: &str) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    chars.len() >= 2
+        && chars.first().is_some_and(|c| c.is_alphabetic())
+        && chars.last().is_some_and(|c| c.is_alphabetic())
+        && chars.windows(2).all(|pair| {
+            let separator = |c: char| c == '\'' || c == '-';
+            pair.iter().all(|&c| c.is_alphabetic() || separator(c))
+                && !(separator(pair[0]) && separator(pair[1]))
+        })
 }
 
 /// A word that may be stored in, or loaded from, the learned phrases file
@@ -662,6 +904,57 @@ mod tests {
         assert_eq!(mode, 0o600);
         assert!(!path.with_extension("tsv.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A miniature of the embedded data: split contractions, junk entries, apostrophe-less forms
+    fn split_contraction_dict() -> Dictionary {
+        let words = "you 5000\ndo 3000\ndon 2500\ndidn 900\ndone 800\ndont 40\nit 4000\nis 3500\n\
+                     't 3400\n'm 2000\ndon`t 30\ni- 20\nmr. 15\ngood-bye 10\nknow 1500";
+        let mut dict = Dictionary::from_frequency_text(words);
+        dict.load_bigrams_tsv("you\tdo\t100\nyou\tdont\t5\nyou\tdecide\t20\ndont\tknow\t50");
+        dict.add_english_contractions();
+        dict
+    }
+
+    #[test]
+    fn test_contractions_replace_split_halves() {
+        let dict = split_contraction_dict();
+        assert_eq!(dict.suggest("don", None, 3)[0], "don't");
+        assert_eq!(dict.suggest("don'", None, 1), vec!["don't"]);
+        assert_eq!(dict.suggest("didn", None, 1), vec!["didn't"]);
+        assert!(!dict.is_known_word("didn") && !dict.is_known_word("dont"));
+        // "don" stays, but only as a rare word
+        assert!(dict.is_known_word("don"));
+        assert_eq!(dict.suggest("Don", None, 1), vec!["Don't"]);
+    }
+
+    #[test]
+    fn test_contraction_casing_and_curly_apostrophe() {
+        let dict = split_contraction_dict();
+        assert_eq!(dict.suggest("i'", None, 1), vec!["I'm"]);
+        assert_eq!(dict.suggest("I'", None, 1), vec!["I'm"]);
+        assert_eq!(dict.suggest("don\u{2019}", None, 1), vec!["don't"]);
+    }
+
+    #[test]
+    fn test_junk_entries_are_dropped() {
+        let dict = split_contraction_dict();
+        assert!(dict.is_known_word("good-bye"));
+        for junk in ["don`t", "i-", "mr.", "'t"] {
+            assert!(!dict.is_known_word(junk), "{junk}");
+        }
+        assert!(is_dictionary_word("o'clock") && is_dictionary_word("mm-hmm"));
+        for junk in ["don`t", "i-", "-ish", "a--b", "x'", "mp3", "a"] {
+            assert!(!is_dictionary_word(junk), "{junk}");
+        }
+    }
+
+    #[test]
+    fn test_bigrams_follow_contractions() {
+        let dict = split_contraction_dict();
+        // "you dont" is rare in the bigram data, but scaled to the contraction's real frequency
+        assert_eq!(dict.suggest("d", Some("you"), 3)[0], "don't");
+        assert_eq!(dict.suggest("k", Some("don't"), 1), vec!["know"]);
     }
 
     #[test]
