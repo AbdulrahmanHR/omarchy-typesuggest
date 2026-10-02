@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -185,23 +185,29 @@ impl Dictionary {
             self.insert(word, frequency);
         }
 
-        // The bigram data comes from another corpus, where contractions mostly vanished in
-        // tokenization and only their rare apostrophe-less spellings remain ("you dont"). Scale
-        // those up by how much rarer the spellings are there than the contractions are in the
-        // word list; the median over all contractions keeps rare spellings from skewing it.
+        // Bigram data whose tokenizer dropped contractions keeps only their rare apostrophe-less
+        // spellings ("you dont"). Scale those up by how much rarer the spellings are there than
+        // the contractions are in the word list; the median over all contractions keeps rare
+        // spellings from skewing it. Contractions the bigram data already has (with the
+        // apostrophe) need no help, and their stray apostrophe-less typos are merged unscaled.
         let unigram_total: f64 = self.words.iter().map(|w| w.frequency as f64).sum();
         let mut as_follower: HashMap<&str, f64> = HashMap::new();
+        let mut native: HashSet<String> = HashSet::new();
         let mut bigram_total = 0.0;
         for followers in self.bigrams.values() {
             for (follower, count) in followers {
                 bigram_total += f64::from(*count);
                 if let Some((spelling, _)) = spellings.get_key_value(follower.as_str()) {
                     *as_follower.entry(spelling).or_default() += f64::from(*count);
+                } else if follower.contains('\'') {
+                    native.insert(follower.clone());
                 }
             }
         }
+        let needs_scaling = |spelling: &str| !native.contains(spellings[spelling]);
         let mut factors: Vec<f64> = as_follower
             .iter()
+            .filter(|(spelling, _)| needs_scaling(spelling))
             .filter_map(|(spelling, seen)| {
                 let contraction = spellings[spelling];
                 let frequency = CONTRACTIONS.iter().find(|(c, _)| *c == contraction)?.1 as f64;
@@ -226,7 +232,8 @@ impl Dictionary {
         for (leader, followers) in self.bigrams.drain() {
             let entry = merged.entry(canonical(&leader)).or_default();
             for (follower, count) in followers {
-                let count = if spellings.contains_key(follower.as_str()) {
+                let count = if spellings.contains_key(follower.as_str()) && needs_scaling(&follower)
+                {
                     (f64::from(count) * scale).min(f64::from(u32::MAX)) as u32
                 } else {
                     count
@@ -347,7 +354,7 @@ impl Dictionary {
         // Apps that auto-insert typographic quotes type ’ for '
         let lower_prefix = prefix.to_lowercase().replace('\u{2019}', "'");
         let mut results = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
 
         // 1. If we have a preceding word in the sentence context, check bigrams first!
         if let Some(prev) = prev_word {
@@ -454,7 +461,7 @@ impl Dictionary {
 
         let max_dist = if q_len <= 3 { 1 } else { 2 };
         let mut candidates: Vec<(String, u64)> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
 
         // 1. Check bigram followers of prev_word first (contextual priority)
         if let Some(pw) = prev_word {
@@ -542,6 +549,8 @@ const RARE_WORD_FREQUENCY: u64 = 20_000;
 ///   correct uses per apostrophe-less one, or a share of the "'s" / "'re" / "'ll" / "'ve" / "'d"
 ///   counts where that spelling is itself a word (its, ill, well, ...)
 /// - y'all, o'clock, ma'am: the counts of "'all", "'clock", "'am"
+///
+/// Being derived from FrequencyWords' data, this table is CC BY-SA 4.0 (see data/README.md).
 const CONTRACTIONS: &[(&str, u64)] = &[
     ("don't", 4_158_644),
     ("didn't", 1_100_643),
@@ -955,6 +964,18 @@ mod tests {
         // "you dont" is rare in the bigram data, but scaled to the contraction's real frequency
         assert_eq!(dict.suggest("d", Some("you"), 3)[0], "don't");
         assert_eq!(dict.suggest("k", Some("don't"), 1), vec!["know"]);
+    }
+
+    #[test]
+    fn test_native_contractions_are_not_inflated() {
+        // Bigram data that keeps apostrophes: a stray "dont" typo must not outrank real pairs
+        let mut dict = Dictionary::from_frequency_text("you 5000\ndo 3000\ndont 40\nknow 900");
+        dict.load_bigrams_tsv("you\tdo\t100\nyou\tdon't\t60\nyou\tdont\t1\nyou\tdecide\t20");
+        dict.add_english_contractions();
+        assert_eq!(
+            dict.suggest("d", Some("you"), 3),
+            vec!["do", "don't", "decide"]
+        );
     }
 
     #[test]

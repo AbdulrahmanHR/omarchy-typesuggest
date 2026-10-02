@@ -34,6 +34,9 @@ jobs:
           mkdir dist
           install -Dm755 typesuggest/target/release/typesuggest dist/typesuggest-x86_64
           strip dist/typesuggest-x86_64
+          install -Dm644 typesuggest/LICENSE dist/LICENSE
+          install -Dm644 typesuggest/THIRD_PARTY_LICENSES.md dist/THIRD_PARTY_LICENSES.md
+          install -Dm644 typesuggest/data/README.md dist/DATA_LICENSES.md
           cd dist
           sha256sum typesuggest-x86_64 > typesuggest-x86_64.sha256
           cat typesuggest-x86_64.sha256
@@ -61,4 +64,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "TypeSuggest $GITHUB_REF_NAME" \
-            --notes "Prebuilt x86_64 binary, built and tested by the Release workflow from the source at this tag. SHA-256: $(cut -d' ' -f1 dist/typesuggest-x86_64.sha256)"
+            --notes "Prebuilt x86_64 binary, built and tested by the Release workflow from the source at this tag. LICENSE, THIRD_PARTY_LICENSES.md and DATA_LICENSES.md cover the code, the compiled libraries and the built-in data. SHA-256: $(cut -d' ' -f1 dist/typesuggest-x86_64.sha256)"

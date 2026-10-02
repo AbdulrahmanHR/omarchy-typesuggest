@@ -16,7 +16,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
   - Words commit directly to the application; typing is never trapped in a locked pre-edit state.
   - Regular arrow keys and document navigation remain 100% free and unhindered.
 - **Contextual Bigram Language Model & Dynamic Phrase Learning:**
-  - Embedded 232,000 contextual word pairs (`bigrams.tsv`) to intelligently bias predictions based on sentence context (e.g. typing "m" after "good" suggests "morning" rather than "much").
+  - Embedded 320,000 contextual word pairs (`bigrams.tsv`) to intelligently bias predictions based on sentence context (e.g. typing "m" after "good" suggests "morning" rather than "much").
   - Learns which word you pick after which, saved to `~/.config/typesuggest/user_bigrams.tsv` (only pairs of dictionary words, so names, codes and passphrases are never stored).
   - Can be toggled on/off on the fly via `--learn`/`--no-learn` or in configuration.
 - **Microsecond Prefix Matching:**
@@ -32,7 +32,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
   - Rendered at 2x for crisp text on scaled displays, using Liberation Sans or DejaVu Sans (or Segoe UI if installed under `~/.local/share/fonts/windows`), or any font you configure.
 - **Lightweight:**
   - Event-driven: 0% CPU while idle.
-  - ~80–100 MB RAM (the 50,000-word dictionary and 232,000-pair language model are kept in memory).
+  - ~100–120 MB RAM (the 50,000-word dictionary and 320,000-pair language model are kept in memory).
   - Single ~7 MB binary with the dictionary embedded.
 
 ---
@@ -80,13 +80,16 @@ hl.env("QT_IM_MODULE", "wayland")
 
 ### 1. Install
 
-**Omarchy:** add the [TypeSuggest Omarchy plugin](../README.md) (this repository) for a bar icon with on/off and quick settings:
-```bash
-omarchy plugin add https://github.com/AbdulrahmanHR/omarchy-typesuggest
-```
-Its *Install TypeSuggest* button downloads the prebuilt x86_64 binary that the [Release workflow](../.github/workflows/release.yml) builds from this source, checks it against the SHA-256 committed in [`release/`](../release/), installs it to `~/.local/bin` and starts it.
+**Omarchy:** add the [TypeSuggest Omarchy plugin](https://github.com/AbdulrahmanHR/omarchy-typesuggest) for a bar icon with on/off and quick settings; its *Install TypeSuggest* button does everything below for you.
 
-**From source** (needs Rust; run inside this `typesuggest/` folder):
+**Arch Linux / Omarchy (AUR):**
+```bash
+omarchy-pkg-aur-add typesuggest   # or: yay -S typesuggest
+typesuggest --enable-autostart
+systemctl --user start typesuggest
+```
+
+**From source** (needs Rust):
 ```bash
 cargo build --release
 mkdir -p ~/.local/bin
@@ -100,11 +103,10 @@ typesuggest
 ```
 
 ### Uninstall
-Run [`scripts/uninstall-typesuggest.sh`](../scripts/uninstall-typesuggest.sh), or by hand:
 ```bash
 typesuggest --disable-autostart
 systemctl --user stop typesuggest
-rm -f ~/.local/bin/typesuggest
+omarchy-pkg-drop typesuggest      # or: yay -R typesuggest (AUR); for source installs delete ~/.local/bin/typesuggest
 rm -rf ~/.config/typesuggest      # settings and learned phrases
 systemctl --user enable --now omarchy-fcitx5.service   # Omarchy: bring Fcitx5 back if you disabled it
 ```
@@ -276,7 +278,12 @@ wayland
 
 ---
 
-## 📄 License
+## 📄 License & Credits
 
-MIT License. See [LICENSE](LICENSE) for details.
+The code is MIT licensed; see [LICENSE](LICENSE). The built-in data keeps its own licenses (details and changes in [`data/README.md`](data/README.md)):
+
+- **Word list:** [FrequencyWords](https://github.com/hermitdave/FrequencyWords) by Hermit Dave, from OpenSubtitles 2018 — [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)
+- **Word pairs:** built from [Tatoeba](https://tatoeba.org) English sentences — [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/)
+
+The Rust libraries compiled into the binary and their licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 

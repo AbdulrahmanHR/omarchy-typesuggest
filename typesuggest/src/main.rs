@@ -562,7 +562,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let embedded_freq = include_str!("../data/en_50k.txt");
     let mut dict = Dictionary::from_frequency_text(embedded_freq);
 
-    // 4b. Load English contextual bigram model (232,000 pairs embedded)
+    // 4b. Load English contextual bigram model (320,000 pairs embedded)
     let embedded_bigrams = include_str!("../data/bigrams.tsv");
     dict.load_bigrams_tsv(embedded_bigrams);
     // The embedded data splits contractions ("don" + "'t"); restore them

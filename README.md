@@ -176,8 +176,14 @@ stores and how it detects password prompts.
 | `scripts/` | Install and uninstall scripts used by the panel |
 | `typesuggest/` | TypeSuggest source code (Rust) |
 | `.github/workflows/release.yml` | Builds and tests `typesuggest/` in an Arch Linux container on every `v*` tag and publishes the binary with its SHA-256 |
+| `typesuggest/data/` | Built-in word list and word pairs, their licenses, and the script that builds the word pairs |
 | `release/typesuggest-x86_64.sha256` | The checksum the install script requires, committed after the release build |
 
-## License
+## License & credits
 
-[MIT](LICENSE)
+The plugin and TypeSuggest's code are [MIT](LICENSE) licensed. The data built into TypeSuggest keeps its own licenses (details and changes in [`typesuggest/data/README.md`](typesuggest/data/README.md)):
+
+- **Word list:** [FrequencyWords](https://github.com/hermitdave/FrequencyWords) by Hermit Dave, from OpenSubtitles 2018: [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)
+- **Word pairs:** built from English sentences by [Tatoeba](https://tatoeba.org) contributors: [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/)
+
+The Rust libraries compiled into the binary are listed with their licenses in [`typesuggest/THIRD_PARTY_LICENSES.md`](typesuggest/THIRD_PARTY_LICENSES.md). Each release includes these notices next to the binary.
