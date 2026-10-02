@@ -569,6 +569,12 @@ impl StateMachine {
                     self.mode = InputMode::Idle;
                     return KeyAction::HideSuggestions;
                 }
+                0x0063 /* 'c' */ | 0x0043 /* 'C' */ => {
+                    // Terminals throw the line away; GUI apps (copy) resync from surrounding text
+                    self.buffer.clear();
+                    self.mode = InputMode::Idle;
+                    return KeyAction::HideSuggestions;
+                }
                 0x0061 /* 'a' */ | 0x0041 /* 'A' */ => {
                     self.buffer.move_home();
                     self.mode = InputMode::Idle;
@@ -1430,6 +1436,26 @@ mod tests {
         // Backspace to 'p' (len 1 < 2) -> hides suggestions
         let act = sm.handle_key_press(0xff08, None, false, &dict);
         assert_eq!(act, KeyAction::HideSuggestions);
+    }
+
+    #[test]
+    fn test_ctrl_c_forgets_the_line() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        for c in "git commit".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        assert_eq!(
+            sm.handle_key_press(0x0063, None, true, &dict),
+            KeyAction::HideSuggestions
+        );
+        assert!(sm.buffer.chars.is_empty());
+        // The next line starts fresh, with no previous word from the cancelled one
+        sm.handle_key_press('p' as u32, Some('p'), false, &dict);
+        assert_eq!(
+            sm.buffer.current_word_prefix_and_prev(),
+            ("p".to_string(), None)
+        );
     }
 
     #[test]

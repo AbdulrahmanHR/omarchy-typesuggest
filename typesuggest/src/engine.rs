@@ -41,6 +41,38 @@ const FALLBACK_MONITOR_EXTENT: u32 = 2160;
 /// Tallest buffer to attach: 16384 px is the smallest texture limit common GPUs guarantee
 const MAX_BUFFER_HEIGHT: u32 = 16384;
 
+/// Upper bound on key repeats replayed for one held key
+const MAX_REPLAYED_REPEATS: u64 = 4096;
+
+/// A forwarded key that may still be held down, so the app may be repeating it
+#[derive(Debug, Clone, Copy)]
+pub struct HeldKey {
+    key: u32,
+    /// Compositor timestamp (ms) of the press
+    pressed_at: u32,
+    keysym: u32,
+    ch: Option<char>,
+    ctrl: bool,
+}
+
+/// Repeats an app generates for a key held `held_ms` with Wayland key repeat at `rate` keys
+/// per second after `delay` ms: the first repeat at `delay`, then one every 1000/rate ms
+pub fn repeats_while_held(rate: i32, delay: i32, held_ms: u32) -> u64 {
+    let (Ok(rate), Ok(delay)) = (u64::try_from(rate), u64::try_from(delay)) else {
+        return 0;
+    };
+    let held_ms = u64::from(held_ms);
+    if rate == 0 || held_ms < delay {
+        return 0;
+    }
+    1 + (held_ms - delay) * rate / 1000
+}
+
+/// Modifier keys, which apps never repeat
+fn is_modifier_keysym(keysym: u32) -> bool {
+    (0xffe1..=0xffee).contains(&keysym) || (0xfe01..=0xfe0f).contains(&keysym) || keysym == 0xff7e
+}
+
 pub struct Engine {
     pub shm: Option<wl_shm::WlShm>,
     pub compositor: Option<wl_compositor::WlCompositor>,
@@ -101,6 +133,13 @@ pub struct Engine {
     pub monitor_extent: u32,
     /// Seat pointer, used to move the bar out of the way when it is shown above the caret
     pub pointer: Option<wl_pointer::WlPointer>,
+    /// Key repeat the compositor tells apps to apply (keys per second, ms before repeating)
+    pub repeat_rate: i32,
+    pub repeat_delay: i32,
+    /// The last forwarded key while it is held down
+    pub held_key: Option<HeldKey>,
+    /// When the held key starts repeating in the app; the main loop calls on_repeat_deadline
+    pub repeat_deadline: Option<std::time::Instant>,
     /// Background writer for the learned phrases, so the disk sync never delays typing
     learned_saver: Option<std::sync::mpsc::Sender<(std::path::PathBuf, String)>>,
 }
@@ -156,6 +195,10 @@ impl Engine {
             learned_saver: None,
             monitor_extent: FALLBACK_MONITOR_EXTENT,
             pointer: None,
+            repeat_rate: 25,
+            repeat_delay: 600,
+            held_key: None,
+            repeat_deadline: None,
         })
     }
 
@@ -398,6 +441,43 @@ impl Engine {
                 self.state_machine.mode = InputMode::Idle;
                 self.hide();
             }
+        }
+    }
+
+    /// The held key started repeating in the app: the shown word is going stale, so hide the
+    /// bar until the key is released
+    pub fn on_repeat_deadline(&mut self) {
+        self.repeat_deadline = None;
+        if self.held_key.is_some() {
+            self.state_machine.mode = InputMode::Idle;
+            self.hide();
+        }
+    }
+
+    /// Apps repeat a held key themselves, so typesuggest sees a single press. Replay the repeats
+    /// the app produced between the press and `until` (compositor timestamps), so the
+    /// remembered line matches what the app did. Apps that report surrounding text resync on
+    /// their own and are left to that.
+    fn apply_key_repeats(&mut self, held: HeldKey, until: u32, qh: &QueueHandle<Self>) {
+        let held_ms = until.wrapping_sub(held.pressed_at);
+        let repeats = repeats_while_held(self.repeat_rate, self.repeat_delay, held_ms)
+            .min(MAX_REPLAYED_REPEATS);
+        if repeats == 0
+            || !self.active
+            || self.is_sensitive
+            || self.app_disabled
+            || self.surrounding.is_some()
+        {
+            return;
+        }
+        for _ in 0..repeats {
+            let _ =
+                self.state_machine
+                    .handle_key_press(held.keysym, held.ch, held.ctrl, &self.dict);
+        }
+        match self.state_machine.mode {
+            InputMode::Idle => self.hide(),
+            _ => self.redraw_current(qh),
         }
     }
 
@@ -686,6 +766,8 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for Engine {
                 state.surrounding = None;
                 state.pending_secret = None;
                 state.pending_surrounding = None;
+                state.held_key = None;
+                state.repeat_deadline = None;
                 state.awaiting_caret_rect = false;
                 state.placeholder_deferrals = 0;
                 state.state_machine.reset();
@@ -707,6 +789,8 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for Engine {
             }
             zwp_input_method_v2::Event::Deactivate => {
                 state.active = false;
+                state.held_key = None;
+                state.repeat_deadline = None;
                 state.cursor_rect = None;
                 state.pending_secret = None;
                 state.awaiting_caret_rect = false;
@@ -852,6 +936,12 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                                 }
                             }
                         };
+                    }
+
+                    // A new key ends the previous key's repeat in the app; catch up on what it did
+                    if let Some(held) = state.held_key.take() {
+                        state.repeat_deadline = None;
+                        state.apply_key_repeats(held, time, qh);
                     }
 
                     // The grab receives every key, even when the focused app has no enabled
@@ -1072,6 +1162,25 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             state.swallowed_keys.insert(key);
                         }
                     }
+
+                    // The app repeats a key that stays down; remember it to keep up with that
+                    if forwarded && !is_modifier_keysym(keysym_raw) {
+                        state.held_key = Some(HeldKey {
+                            key,
+                            pressed_at: time,
+                            keysym: keysym_raw,
+                            ch: char_opt,
+                            ctrl: ctrl_active,
+                        });
+                        if state.repeat_rate > 0 {
+                            state.repeat_deadline = Some(
+                                std::time::Instant::now()
+                                    + std::time::Duration::from_millis(
+                                        state.repeat_delay.max(0) as u64
+                                    ),
+                            );
+                        }
+                    }
                 } else {
                     // Key released
                     if state.swallowed_keys.remove(&key) {
@@ -1079,11 +1188,47 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                     } else if let Some(vk) = &state.vk {
                         vk.key(time, key, 0);
                     }
+                    if let Some(held) = state.held_key.filter(|h| h.key == key) {
+                        state.held_key = None;
+                        state.repeat_deadline = None;
+                        state.apply_key_repeats(held, time, qh);
+                    }
                 }
             }
 
-            zwp_input_method_keyboard_grab_v2::Event::RepeatInfo { .. } => {}
+            zwp_input_method_keyboard_grab_v2::Event::RepeatInfo { rate, delay } => {
+                state.repeat_rate = rate;
+                state.repeat_delay = delay;
+            }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_repeats_while_held() {
+        // Hyprland's defaults: 25 keys per second after 600 ms
+        assert_eq!(repeats_while_held(25, 600, 599), 0);
+        assert_eq!(repeats_while_held(25, 600, 600), 1);
+        assert_eq!(repeats_while_held(25, 600, 639), 1);
+        assert_eq!(repeats_while_held(25, 600, 640), 2);
+        assert_eq!(repeats_while_held(25, 600, 2500), 48);
+        // Repeat turned off, or nonsense values from the compositor
+        assert_eq!(repeats_while_held(0, 600, 5000), 0);
+        assert_eq!(repeats_while_held(-1, 600, 5000), 0);
+        assert_eq!(repeats_while_held(25, -5, 5000), 0);
+    }
+
+    #[test]
+    fn test_modifiers_are_not_repeated() {
+        assert!(is_modifier_keysym(0xffe1)); // Shift_L
+        assert!(is_modifier_keysym(0xffe3)); // Control_L
+        assert!(is_modifier_keysym(0xfe03)); // ISO_Level3_Shift (AltGr)
+        assert!(!is_modifier_keysym(0xff08)); // BackSpace
+        assert!(!is_modifier_keysym(0x0061)); // a
     }
 }

@@ -663,12 +663,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("typesuggest is running and listening for text input.");
 
-    // 8. Main event loop
+    // 8. Main event loop: wait for Wayland events, or until a held key starts repeating in the
+    // app (Engine::on_repeat_deadline)
     loop {
-        event_queue.blocking_dispatch(&mut engine)?;
+        event_queue.dispatch_pending(&mut engine)?;
         if engine.unavailable {
             // The unit's RestartPreventExitStatus keeps systemd from retrying in a loop
             std::process::exit(EXIT_IME_UNAVAILABLE);
+        }
+        event_queue.flush()?;
+
+        let Some(guard) = event_queue.prepare_read() else {
+            continue;
+        };
+        let timeout = engine.repeat_deadline.map(|deadline| {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            rustix::event::Timespec {
+                tv_sec: left.as_secs() as i64,
+                tv_nsec: i64::from(left.subsec_nanos()),
+            }
+        });
+        let ready = {
+            let fd = guard.connection_fd();
+            let mut fds = [rustix::event::PollFd::new(
+                &fd,
+                rustix::event::PollFlags::IN,
+            )];
+            rustix::event::poll(&mut fds, timeout.as_ref())
+        };
+        match ready {
+            Ok(0) => {
+                drop(guard);
+                engine.on_repeat_deadline();
+            }
+            Ok(_) => match guard.read() {
+                Ok(_) => {}
+                Err(wayland_client::backend::WaylandError::Io(e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e.into()),
+            },
+            Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(e.into()),
         }
     }
 }
