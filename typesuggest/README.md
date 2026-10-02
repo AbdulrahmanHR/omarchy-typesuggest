@@ -44,7 +44,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
   ```bash
   systemctl --user disable --now omarchy-fcitx5.service
   ```
-- Rust toolchain (`cargo`) to build.
+- Rust toolchain (`cargo`), only to build from source.
 
 ## 🧩 App Compatibility
 
@@ -54,12 +54,14 @@ Suggestions appear in apps that support the Wayland `text-input-v3` protocol. In
 |---|---|---|
 | Terminals (foot, Ghostty and others with Wayland IME support) | ✅ | |
 | GTK 3 / GTK 4 apps | ✅ | |
-| Qt 6 apps | ✅ | Needs `QT_IM_MODULE=wayland` (Omarchy sets it to `fcitx`); see below |
+| Qt 6 apps | ✅ | Needs `QT_IM_MODULE=wayland` or unset (Omarchy sets it to `fcitx`); see below |
 | Chromium, Brave, Chrome | ✅ | Needs `--enable-wayland-ime`; see below |
 | Electron apps (Notion, Obsidian, VS Code, ...) | ✅ | Needs `--enable-wayland-ime`; see below |
 | XWayland apps | ➖ | No suggestions; typing is unaffected |
 
 To turn TypeSuggest off in particular apps, list their window classes in `disabled_apps` (see Configuration below).
+
+On Omarchy, the plugin's *Install TypeSuggest* button offers to make the Chromium, Electron and Qt changes below for you (and its uninstall script undoes them).
 
 **Chromium and Electron apps:** add these lines to the app's flags file (e.g. `~/.config/brave-flags.conf`, `~/.config/chromium-flags.conf`, `~/.config/electron-flags.conf`), then fully restart the app:
 ```text
@@ -69,9 +71,10 @@ To turn TypeSuggest off in particular apps, list their window classes in `disabl
 ```
 `--force-device-scale-factor=1` is only needed when the desktop text size is not the default (e.g. Omarchy's *Text size* setting, GNOME's text scaling factor). Chromium applies that factor internally but does not account for it in the caret position it reports, so without the flag the bar drifts right and below the caret. The flag keeps your display scaling; these apps then ignore the custom text size.
 
-**Qt apps on Omarchy:** Omarchy points Qt at Fcitx5. Switch Qt to the Wayland input method in `~/.config/hypr/hyprland.lua`, then log out and back in:
-```lua
-hl.env("QT_IM_MODULE", "wayland")
+**Qt apps on Omarchy:** Omarchy points Qt at Fcitx5 (`QT_IM_MODULE=fcitx` in `/usr/lib/environment.d/10-omarchy-fcitx.conf`). Override it with a file of your own, then log out and back in:
+```bash
+mkdir -p ~/.config/environment.d
+echo 'QT_IM_MODULE=wayland' > ~/.config/environment.d/90-typesuggest.conf
 ```
 
 ---
@@ -82,9 +85,11 @@ hl.env("QT_IM_MODULE", "wayland")
 
 **Omarchy:** add the [TypeSuggest Omarchy plugin](https://github.com/AbdulrahmanHR/omarchy-typesuggest) for a bar icon with on/off and quick settings; its *Install TypeSuggest* button does everything below for you.
 
-**Arch Linux / Omarchy (AUR):**
+**Prebuilt binary** (x86_64), from the [latest release](https://github.com/AbdulrahmanHR/omarchy-typesuggest/releases/latest):
 ```bash
-omarchy-pkg-aur-add typesuggest   # or: yay -S typesuggest
+curl -fLO https://github.com/AbdulrahmanHR/omarchy-typesuggest/releases/latest/download/typesuggest-x86_64
+curl -fLO https://github.com/AbdulrahmanHR/omarchy-typesuggest/releases/latest/download/typesuggest-x86_64.sha256
+sha256sum -c typesuggest-x86_64.sha256 && install -Dm755 typesuggest-x86_64 ~/.local/bin/typesuggest
 typesuggest --enable-autostart
 systemctl --user start typesuggest
 ```
@@ -106,7 +111,7 @@ typesuggest
 ```bash
 typesuggest --disable-autostart
 systemctl --user stop typesuggest
-omarchy-pkg-drop typesuggest      # or: yay -R typesuggest (AUR); for source installs delete ~/.local/bin/typesuggest
+rm -f ~/.local/bin/typesuggest ~/.config/systemd/user/typesuggest.service
 rm -rf ~/.config/typesuggest      # settings and learned phrases
 systemctl --user enable --now omarchy-fcitx5.service   # Omarchy: bring Fcitx5 back if you disabled it
 ```

@@ -6,7 +6,7 @@ authors = ["Abdulrahman Rahmouni <AbdulrahmanHR@users.noreply.github.com>"]
 description = "Native Windows-style hardware keyboard text suggestions for Linux on Wayland"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/AbdulrahmanHR/typesuggest"
+repository = "https://github.com/AbdulrahmanHR/omarchy-typesuggest"
 keywords = ["wayland", "text-suggestions", "ime", "hyprland", "autocomplete"]
 categories = ["command-line-utilities", "gui"]
 
