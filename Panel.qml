@@ -305,7 +305,9 @@ Panel {
 
         Column {
           id: column
-          width: panelFlick.width
+          // A 1px inset keeps the outer borders of the first and last buttons inside the clip
+          x: 1
+          width: panelFlick.width - 2
           spacing: Style.space(12)
 
           // ---------- Hero: keyboard icon · title/status · on/off ----------
