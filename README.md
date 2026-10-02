@@ -7,6 +7,29 @@ TypeSuggest source lives in this repository too, in [`typesuggest/`](typesuggest
 
 <p align="center"><img src="preview.png" alt="The TypeSuggest panel in the Omarchy bar" width="347"></p>
 
+## Install
+
+1. Add the plugin and put it on the bar:
+
+   ```bash
+   omarchy plugin add https://github.com/AbdulrahmanHR/omarchy-typesuggest --enable
+   ```
+
+   Omarchy asks before cloning, then asks where on the bar the icon goes (the
+   right side by default). Plugins run as unsandboxed code inside the Omarchy
+   shell, so read the code before you enable it.
+
+2. Click the new keyboard icon in the bar, choose **Install TypeSuggest**, and
+   confirm in the terminal that opens. It installs and starts TypeSuggest, then
+   offers to turn on suggestions in browsers, Electron apps and Qt apps (see
+   [What the Install button does](#what-the-install-button-does)).
+
+That's it: start typing in any text field. If you added the plugin without
+enabling it, enable it with
+`omarchy plugin enable io.github.abdulrahmanhr.typesuggest`.
+
+## The panel
+
 It adds a keyboard icon to the Omarchy bar. The icon is dimmed while
 TypeSuggest is off, and its tooltip says whether it is on. Clicking it opens a
 panel styled like Omarchy's own panels:
@@ -50,22 +73,7 @@ programs, all of which Omarchy already ships except TypeSuggest itself:
 | `sh` | The installed check (`command -v typesuggest`) |
 | `omarchy-launch-config-editor` | **Open config file** |
 | `omarchy-launch-floating-terminal-with-presentation`, `bash` | **Install TypeSuggest** |
-| `curl`, `sha256sum`, `jq`, `install`, `gum` | Inside the install script |
-
-## Install
-
-```bash
-omarchy plugin add https://github.com/AbdulrahmanHR/omarchy-typesuggest
-```
-
-Omarchy asks before cloning, then offers to enable the plugin and place it on
-the bar (it goes to the right side by default). Plugins run as unsandboxed code
-inside the Omarchy shell, so read the code before you enable it. To enable it
-later:
-
-```bash
-omarchy plugin enable io.github.abdulrahmanhr.typesuggest
-```
+| `curl`, `sha256sum`, `jq`, `install`, `grep`, `gum` | Inside the install and uninstall scripts |
 
 ## Using it
 
@@ -126,16 +134,25 @@ confirm. Then it:
    (`~/.XCompose`), which stop working while it is off.
 3. Starts TypeSuggest and enables it on login:
    `typesuggest --enable-autostart`, then `systemctl --user restart typesuggest`.
+4. Offers to turn on suggestions in apps that need one extra setting, and
+   asks again before changing anything. It lists every file first:
+   - Chromium-based browsers and Electron apps: adds `--enable-wayland-ime` to
+     the flags file of each one that is installed or already has a flags file
+     (`~/.config/chromium-flags.conf`, `brave-flags.conf`, `chrome-flags.conf`,
+     `code-flags.conf`, `electron-flags.conf`, `electronNN-flags.conf`), unless
+     the flag is already there. Takes effect when the app is fully restarted.
+   - Qt apps: Omarchy points them at Fcitx5 (`QT_IM_MODULE=fcitx`), so it writes
+     `QT_IM_MODULE=wayland` to `~/.config/environment.d/90-typesuggest.conf`.
+     Takes effect at the next login.
+
+   It records what it changed in `~/.local/state/typesuggest/app-settings`, so
+   the uninstall script undoes exactly that. Without step 4, suggestions show up
+   in terminals and GTK apps only (see
+   [App compatibility](typesuggest/README.md#-app-compatibility)).
 
 It stops at the first failed step. The binary is the only download, nothing is
-piped into a shell, and your Omarchy and shell configuration are not touched.
+piped into a shell, and nothing outside the files listed above is changed.
 Prebuilt binaries are x86_64 only; on other machines build from source.
-
-Some apps need one extra setting before suggestions appear (Chromium and
-Electron apps need `--enable-wayland-ime`; Qt apps on Omarchy need
-`QT_IM_MODULE=wayland`). See
-[App compatibility](typesuggest/README.md#-app-compatibility) in the
-TypeSuggest README.
 
 ## Remove
 
@@ -148,16 +165,20 @@ omarchy plugin remove io.github.abdulrahmanhr.typesuggest
 Remove TypeSuggest itself with
 [`scripts/uninstall-typesuggest.sh`](scripts/uninstall-typesuggest.sh) (run it
 from the plugin folder, `~/.config/omarchy/plugins/io.github.abdulrahmanhr.typesuggest/`
-before removing the plugin). It stops the service, deletes the program, and asks
-before turning Fcitx5 back on and before deleting your settings and learned
-phrases. By hand:
+before removing the plugin). It stops the service, deletes the program, undoes
+the app settings from step 4, and asks before turning Fcitx5 back on and before
+deleting your settings and learned phrases. By hand:
 
 ```bash
 systemctl --user disable --now typesuggest
 rm -f ~/.local/bin/typesuggest ~/.config/systemd/user/typesuggest.service
+rm -f ~/.config/environment.d/90-typesuggest.conf   # Qt setting from step 4
 systemctl --user enable --now omarchy-fcitx5.service
 rm -rf ~/.config/typesuggest          # optional: settings and learned phrases
 ```
+
+and delete the `--enable-wayland-ime` lines step 4 added to the files listed
+in `~/.local/state/typesuggest/app-settings`.
 
 ## Privacy
 
