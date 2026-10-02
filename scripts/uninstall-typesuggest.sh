@@ -68,6 +68,8 @@ if [[ -f $qt_env_file ]]; then
 fi
 
 run systemctl --user daemon-reload
+# Drop the session's copy of QT_IM_MODULE so the next login uses Omarchy's value again
+$app_settings_removed && run systemctl --user unset-environment QT_IM_MODULE
 
 if systemctl --user cat omarchy-fcitx5.service >/dev/null 2>&1 &&
   ! systemctl --user is-enabled --quiet omarchy-fcitx5.service &&

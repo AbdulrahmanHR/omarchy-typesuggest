@@ -218,6 +218,10 @@ else
     if $needs_qt_env; then
       write_qt_env
       run systemctl --user daemon-reload
+      # Omarchy's autostart copies the session's QT_IM_MODULE=fcitx into systemd,
+      # which outranks environment.d until systemd's user manager restarts.
+      # Dropping that copy lets the next login use the new file.
+      run systemctl --user unset-environment QT_IM_MODULE
     fi
     echo
     if ((${#flags_files[@]})); then
