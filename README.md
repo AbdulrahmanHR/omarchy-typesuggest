@@ -5,6 +5,8 @@ An [Omarchy](https://omarchy.org) 4 (Quattro) shell plugin for
 Windows-style word suggestions at the text cursor while you type. The
 TypeSuggest source lives in this repository too, in [`typesuggest/`](typesuggest/).
 
+<p align="center"><img src="preview.png" alt="The TypeSuggest panel in the Omarchy bar" width="347"></p>
+
 It adds a keyboard icon to the Omarchy bar. The icon is dimmed while
 TypeSuggest is off, and its tooltip says whether it is on. Clicking it opens a
 panel styled like Omarchy's own panels:
