@@ -24,7 +24,7 @@ Panel {
   //   look           Below, Above | Omarchy, Default (two groups side by side)
   //   size           bar size slider; h/l steps it
   //   count          1 to 5 suggestions
-  //   select         Up, Down (only when typesuggest reports select_key)
+  //   select         Down, Up (only when typesuggest reports select_key)
   //   keys           Enter, Space, Tab
   //   learn, typo    switch rows
   //   hover          switch row (when typesuggest reports hover_highlight)
@@ -649,7 +649,7 @@ Panel {
               width: parent.width
               section: "mousehide"
               title: "Hide on mouse"
-              caption: "Hide the bar when the mouse moves over the area above it"
+              caption: "Hide when the mouse moves above the bar"
               checked: root.config.mouse_hides_bar === true
               onToggled: typesuggest.setOption("mouse_hides_bar", !root.config.mouse_hides_bar)
             }
