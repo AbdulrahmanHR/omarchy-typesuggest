@@ -76,8 +76,18 @@ Item {
   // settings, which the panel asks for each time it opens.
   function refresh(withConfig) {
     if (withConfig === true) _wantConfig = true
+    armWatchdog()
     if (!installProbe.running) installProbe.running = true
-    if (!probeWatchdog.running) probeWatchdog.start()
+  }
+
+  // Call before starting a probe. A probe started while none is running gets
+  // the watchdog's full interval; one already running keeps its deadline, so
+  // a refresh interval shorter than the watchdog's never puts its kill off.
+  function armWatchdog() {
+    var probing = installProbe.running || helpProbe.running
+      || stateProbe.running || configProcess.running
+    if (!probing) probeWatchdog.restart()
+    else if (!probeWatchdog.running) probeWatchdog.start()
   }
 
   function loadConfig() {
@@ -89,8 +99,8 @@ Item {
       return
     }
     if (configProcess.running) return
+    armWatchdog()
     configProcess.running = true
-    if (!probeWatchdog.running) probeWatchdog.start()
   }
 
   function applyInstalled(isInstalled) {
@@ -110,8 +120,9 @@ Item {
     if (!stateProbe.running) stateProbe.running = true
     // Ask again on each panel open (not on the icon's periodic check), so an
     // upgraded or downgraded build shows its version and settings without
-    // restarting the shell. --help exits before TypeSuggest loads anything,
-    // and applyCapability reads the settings once it answers.
+    // restarting the shell. --help only prints (every build also writes the
+    // default config.toml if there is none) and never starts the daemon;
+    // applyCapability reads the settings once it answers.
     if (!capabilityChecked || _wantConfig) {
       if (!helpProbe.running) helpProbe.running = true
     }
