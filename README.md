@@ -39,9 +39,10 @@ panel styled like Omarchy's own panels:
 - Quick settings: where the suggestion bar sits (below or above the cursor),
   bar size (0.75x to 2x), how many suggestions to show (1 to 5), which arrow
   key moves into the suggestions (Up or Down), which keys accept a suggestion
-  (Enter, Space, Tab; at least one stays on), learning,
-  typo correction, and colors (follow the Omarchy theme, or TypeSuggest's
-  default palette).
+  (Enter, Space, Tab; at least one stays on), learning, typo correction,
+  highlighting the suggestion under the mouse, hiding the bar when the mouse
+  moves above it (with the bar above the cursor), and colors (follow the
+  Omarchy theme, or TypeSuggest's default palette).
 - **Clear learned phrases**, after a confirmation.
 - **Open config file**, which opens `~/.config/typesuggest/config.toml` in your
   editor the way Omarchy opens its own config files.
@@ -64,8 +65,9 @@ If TypeSuggest is not installed, the panel explains what it is and offers an
   whose `typesuggest --help` lists `--config-json` and `--set` (1.0.0 and
   later); with an older build the panel still has the on/off switch, but asks
   you to update before it shows the settings. Clicking a suggestion and the
-  **Select key** row need TypeSuggest 1.2.0 or later (the row is left out for
-  older builds); to update, run `bash <plugin dir>/scripts/install-typesuggest.sh`
+  **Select key** row need TypeSuggest 1.2.0 or later, and the **Hover
+  highlight** and **Hide on mouse** rows 1.2.1 (rows are left out for older
+  builds); to update, run `bash <plugin dir>/scripts/install-typesuggest.sh`
   again.
 
 ### External dependencies
@@ -120,7 +122,7 @@ panel.
 | Which build is it, and does it support the settings? | `typesuggest --help` (its first line names the version), each time the panel opens |
 | Is it on? | `systemctl --user is-active typesuggest` |
 | Read the settings | `typesuggest --config-json` |
-| Change a setting | `typesuggest --set <key> <value>` with `bar_position`, `bar_scale`, `max_candidates`, `select_key`, `accept_keys`, `learn`, `typo_correction` or `theme` |
+| Change a setting | `typesuggest --set <key> <value>` with `bar_position`, `bar_scale`, `max_candidates`, `select_key`, `accept_keys`, `learn`, `typo_correction`, `hover_highlight`, `mouse_hides_bar` or `theme` |
 | Turn on | `typesuggest --enable-autostart`, then `systemctl --user start typesuggest` |
 | Turn off | `systemctl --user stop typesuggest`, then `typesuggest --disable-autostart` |
 | Clear learned phrases | `typesuggest --clear-learned` (TypeSuggest restarts its service so the daemon forgets them too) |

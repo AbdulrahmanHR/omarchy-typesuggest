@@ -12,7 +12,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
   - **Press `Left` / `Right`**: Cycles between the suggestion pills.
   - **Press `Down` or `Escape`** (`Up` or `Escape`, with `select_key = "down"`): Cancels suggestion navigation and returns focus directly to the document caret (swallowing the key). Pressing the key that entered navigation again keeps you in the bar.
   - **Press `Enter`, `Space`, or `Tab`**: Commits the chosen candidate + trailing space and **swallows the keystroke** (preventing accidental message sending in chat apps like Discord, Slack, WhatsApp, Notion, etc.). Which keys commit and whether a space follows are configurable.
-  - **Click a suggestion** (left mouse button): Commits that word the same way, without highlighting it first.
+  - **Click a suggestion** (left mouse button): Commits that word the same way, without highlighting it first. The pointer turns into a hand over a suggestion, which is highlighted like a keyboard selection (`hover_highlight`).
 - **Unrestricted Normal Typing & Caret Freedom:**
   - Words commit directly to the application; typing is never trapped in a locked pre-edit state.
   - Arrow keys and document navigation stay free; only the select key (`Up` by default) is taken while suggestions are showing, so in a terminal it moves into the bar instead of recalling shell history.
@@ -166,6 +166,8 @@ systemctl --user restart typesuggest.service
 | **`Tab`** | Indents / tabs in app | **Commits candidate + space** (swallowed) |
 | **Left click** on a suggestion | **Commits that suggestion + space** while the bar shows | **Commits that suggestion + space**, whichever pill is highlighted |
 
+Hovering a suggestion highlights it (`hover_highlight = false` turns that off). Before `Up` the highlight only shows what a click would take, and keys type as usual; once you are in navigation, the selection follows the mouse, so an accept key takes the hovered word.
+
 A click within a moment (0.3 s) of the bar appearing or changing its words is ignored, so the second click of a double click, or a click aimed at the text as the bar pops up, never takes a word. If the bar appears under a mouse that has not moved, move it slightly before clicking: Hyprland does not tell TypeSuggest where a still pointer is.
 
 The key that enters navigation (`select_key`, `Up` or `Down`), the keys that commit (`accept_keys`) and the space after the word (`trailing_space`) can be changed in the configuration. A key left out of `accept_keys` ends navigation and reaches the app as usual, so with `accept_keys = space, tab` Enter always sends your message.
@@ -216,6 +218,13 @@ accept_keys = enter, space, tab
 # Insert a space after the committed word (default: true)
 trailing_space = true
 
+# Highlight the suggestion under the mouse (default: true)
+hover_highlight = true
+
+# With bar_position = "above": hide the bar when the mouse moves over the empty area above it
+# (default: false, the bar hides only when that area is clicked)
+mouse_hides_bar = false
+
 # Hyprland window classes where TypeSuggest stays off (default: none)
 disabled_apps =
 
@@ -232,12 +241,14 @@ font = ""
 | `min_prefix_length` | `1` | Letters typed before suggestions appear (1 - 10). |
 | `max_candidates` | `3` | Number of suggestion pills (1 - 5). |
 | `bar_scale` | `1.0` | Bar size multiplier (0.5 - 3.0). |
-| `bar_position` | `"below"` | `"below"` or `"above"` the caret. Near the bottom of the screen the bar always goes above. With `"above"`, moving the mouse over the empty area above the bar hides the bar so it never blocks clicks (Hyprland gives that area to the input method while the bar is shown); the bar itself can still be clicked, reaching it from below or from the side, since passing over the area above it hides it. |
+| `bar_position` | `"below"` | `"below"` or `"above"` the caret. Near the bottom of the screen the bar always goes above. With `"above"`, Hyprland gives the empty area above the bar to the input method while the bar shows, so a click there hides the bar and the text under it is clicked again; with `mouse_hides_bar = true` the bar hides as soon as the mouse moves over that area instead. Moving the mouse onto the bar never hides it. |
 | `theme` | `"omarchy"` | `"omarchy"` takes the bar colors from the current Omarchy theme (`$XDG_STATE_HOME/omarchy/current/theme/colors.toml`) and follows theme switches automatically, falling back to the built-in palette when no Omarchy theme is found. `"default"` always uses the built-in dark teal palette. |
 | `color_background`, `color_border`, `color_pill`, `color_pill_border`, `color_text`, `color_accent`, `color_accent_text` | unset | Override single colors (bar background and border, unselected pill background, border and text, selected pill background and text) as `"#rrggbb"` or `"#rrggbbaa"`. Invalid values are ignored. |
 | `select_key` | `"up"` | Arrow key that moves into the suggestions while they show: `"up"` or `"down"`. The other arrow then moves the caret as usual. In navigation, the other arrow or `Escape` goes back to the text, and the select key again stays in the bar. |
 | `accept_keys` | `enter, space, tab` | Keys that commit the highlighted suggestion. Any of `enter`, `space`, `tab`; also written as `["enter", "tab"]`. Other keys end navigation and reach the app. |
 | `trailing_space` | `true` | Add a space after the committed word. The accept key itself is still swallowed. |
+| `hover_highlight` | `true` | Highlight the suggestion under the mouse the way the keyboard selection is shown. A click takes the word under the mouse either way. |
+| `mouse_hides_bar` | `false` | Only with `bar_position = "above"`: hide the bar as soon as the mouse moves over the empty area above it, so a click there always reaches the text. Off, the bar stays until that area is clicked. |
 | `disabled_apps` | none | Window classes where TypeSuggest does nothing at all, e.g. `code, org.wezfurlong.wezterm` or `["code", "steam*"]`. Matching is case-insensitive and a trailing `*` matches any suffix. Find a window's class with `hyprctl activewindow`. |
 | `typo_correction` | `true` | When nothing starts with the typed letters, suggest similar words (`teh` -> `the`). |
 | `font` | `""` | Empty uses Segoe UI (if installed under `~/.local/share/fonts/windows`), then Liberation Sans, then DejaVu Sans. A family name (e.g. `"Inter"`, or a fontconfig pattern like `"Inter:bold"`) is looked up with `fc-match`; a value containing `/` is a font file path (`~/` allowed). Fonts that cannot be loaded fall back to the default with a warning in the log. |

@@ -14,6 +14,10 @@ use wayland_client::protocol::{
     wl_surface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::{self, Shape as CursorShape},
+    wp_cursor_shape_manager_v1,
+};
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     ContentHint, ContentPurpose,
 };
@@ -51,6 +55,15 @@ const BTN_LEFT: u32 = 0x110;
 /// click of a double click, or a click aimed at the text just as the bar pops up under the
 /// pointer, would otherwise take a word nobody chose.
 const CLICK_GUARD: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The cursor over the popup: a hand over a suggestion, which a click takes, else an arrow
+fn cursor_shape_at(pill: Option<usize>) -> CursorShape {
+    if pill.is_some() {
+        CursorShape::Pointer
+    } else {
+        CursorShape::Default
+    }
+}
 
 /// Whether a click at `now` comes too soon after the bar's words changed at `changed_at`
 fn click_too_soon(changed_at: Option<std::time::Instant>, now: std::time::Instant) -> bool {
@@ -211,6 +224,17 @@ pub struct Engine {
     /// pointer leaves and whenever the popup may have moved since, so a click only counts
     /// where the pointer was seen over the bar as it is now.
     pub pointer_pos: Option<(f64, f64)>,
+    /// The suggestion under the pointer, drawn highlighted like a keyboard selection while
+    /// `hover_highlight` is on
+    pub hover_index: Option<usize>,
+    /// Sets the cursor over the popup: an arrow, and a hand over a suggestion. The popup is
+    /// our surface, so without this Hyprland shows no cursor at all over it.
+    pub cursor_shape_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
+    pub cursor_shape_device: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    /// Serial of the pointer's last enter on the popup, which a cursor change must name, and
+    /// the shape set since that enter
+    pointer_enter_serial: Option<u32>,
+    cursor_shape: Option<CursorShape>,
     /// When the bar last appeared or changed its words (see `CLICK_GUARD`)
     pub bar_changed_at: Option<std::time::Instant>,
     /// Key repeat the compositor tells apps to apply (keys per second, ms before repeating)
@@ -277,6 +301,11 @@ impl Engine {
             pointer: None,
             bar_areas: None,
             pointer_pos: None,
+            hover_index: None,
+            cursor_shape_manager: None,
+            cursor_shape_device: None,
+            pointer_enter_serial: None,
+            cursor_shape: None,
             bar_changed_at: None,
             repeat_rate: 25,
             repeat_delay: 600,
@@ -472,7 +501,7 @@ impl Engine {
                     // A popup of another size may be placed elsewhere, and Hyprland tells a
                     // pointer that stays still nothing about it
                     if self.bar_areas.as_ref().map(|a| a.bar) != Some(areas.bar) {
-                        self.pointer_pos = None;
+                        self.forget_pointer();
                     }
                     self.bar_areas = Some(areas);
                 }
@@ -482,7 +511,7 @@ impl Engine {
 
     pub fn hide(&mut self) {
         // The bar may show up somewhere else next time, under a pointer that never moved
-        self.pointer_pos = None;
+        self.forget_pointer();
         if self.is_popup_visible
             && let Some(surface) = &self.popup_surface
         {
@@ -494,7 +523,11 @@ impl Engine {
     /// Re-show the suggestions the state machine currently holds, if any
     pub fn redraw_current(&mut self, qh: &QueueHandle<Self>) {
         let (candidates, selected) = match &self.state_machine.mode {
-            InputMode::Suggesting { candidates, .. } => (candidates.clone(), None),
+            // Before the keyboard enters the bar, only the mouse can highlight a suggestion
+            InputMode::Suggesting { candidates, .. } => (
+                candidates.clone(),
+                self.hover_index.filter(|&i| i < candidates.len()),
+            ),
             InputMode::Navigating {
                 candidates,
                 selected_index,
@@ -656,15 +689,87 @@ impl Engine {
         }
     }
 
+    /// Forget where the pointer is, and so which suggestion it hovers. Returns whether a
+    /// hover highlight was showing, which then needs redrawing away.
+    fn forget_pointer(&mut self) -> bool {
+        self.pointer_pos = None;
+        self.hover_index.take().is_some()
+    }
+
+    /// Bind the cursor shape device once both the shape manager and the pointer exist; the
+    /// compositor may announce them in either order
+    fn ensure_cursor_shape_device(&mut self, qh: &QueueHandle<Self>) {
+        if self.cursor_shape_device.is_none()
+            && let (Some(manager), Some(pointer)) = (&self.cursor_shape_manager, &self.pointer)
+        {
+            self.cursor_shape_device = Some(manager.get_pointer(pointer, qh, ()));
+        }
+    }
+
+    /// Show `shape` as the cursor while it is over the popup. Needs the serial of the
+    /// pointer's enter, so it does nothing before the first one.
+    fn set_cursor_shape(&mut self, shape: CursorShape) {
+        if self.cursor_shape == Some(shape) {
+            return;
+        }
+        if let (Some(device), Some(serial)) = (&self.cursor_shape_device, self.pointer_enter_serial)
+        {
+            device.set_shape(serial, shape);
+            self.cursor_shape = Some(shape);
+        }
+    }
+
+    /// Highlight the suggestion at `index` (or none) because the mouse is over it. While the
+    /// keyboard is in the bar the selection follows the mouse too, so an accept key takes the
+    /// word that is highlighted; before that the highlight is only drawn, and keys type as usual.
+    fn set_hover(&mut self, index: Option<usize>, qh: &QueueHandle<Self>) {
+        if index == self.hover_index {
+            return;
+        }
+        self.hover_index = index;
+        if let Some(index) = index {
+            self.state_machine.select_while_navigating(index);
+        }
+        self.redraw_current(qh);
+    }
+
     /// The pointer entered the popup or moved over it
-    fn pointer_moved(&mut self, x: f64, y: f64) {
+    fn pointer_moved(&mut self, x: f64, y: f64, qh: &QueueHandle<Self>) {
         self.pointer_pos = Some((x, y));
-        // Above the caret, the popup's transparent part covers the text above it and would take
-        // the mouse; get out of the way as soon as the mouse moves there. Over the bar itself
-        // it stays, so its pills can be clicked.
-        let on_bar =
-            self.is_popup_visible && self.bar_areas.as_ref().is_some_and(|a| a.on_bar(x, y));
-        if self.config.bar_position == BarPosition::Above && !on_bar {
+        let (on_bar, pill) = match self.bar_areas.as_ref().filter(|_| self.is_popup_visible) {
+            Some(areas) => (areas.on_bar(x, y), areas.pill_at(x, y)),
+            None => (false, None),
+        };
+        self.set_cursor_shape(cursor_shape_at(pill));
+        // Above the caret, the popup's transparent part covers the text above it and takes the
+        // mouse there. With mouse_hides_bar the bar gets out of the way as soon as the mouse
+        // moves over that part; otherwise it stays, and a click there only hides it.
+        if self.config.bar_position == BarPosition::Above && self.config.mouse_hides_bar && !on_bar
+        {
+            self.state_machine.mode = InputMode::Idle;
+            self.hide();
+            return;
+        }
+        let hover = if self.config.hover_highlight {
+            pill
+        } else {
+            None
+        };
+        self.set_hover(hover, qh);
+    }
+
+    /// A left button press on the popup. On a suggestion it takes that word; on the
+    /// transparent part above the bar (bar_position = "above") it hides the bar, since the
+    /// click was meant for the text under it, which can then be clicked again.
+    fn press_popup(&mut self, time: u32, conn: &Connection) {
+        let position = self.pointer_pos;
+        let areas = self.bar_areas.as_ref().filter(|_| self.is_popup_visible);
+        let on_bar = matches!((position, areas), (Some((x, y)), Some(a)) if a.on_bar(x, y));
+        if on_bar {
+            self.click_bar(time, conn);
+        } else if self.is_popup_visible && self.config.bar_position == BarPosition::Above {
+            // Unknown position (no motion since the bar moved) counts as off the bar: hiding
+            // costs nothing, while keeping the bar would swallow the click again
             self.state_machine.mode = InputMode::Idle;
             self.hide();
         }
@@ -803,6 +908,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Engine {
                 "zwp_virtual_keyboard_manager_v1" => {
                     state.vk_manager = Some(registry.bind(name, version.min(1), qh, ()));
                 }
+                "wp_cursor_shape_manager_v1" => {
+                    state.cursor_shape_manager = Some(registry.bind(name, version.min(1), qh, ()));
+                    state.ensure_cursor_shape_device(qh);
+                }
                 _ => {}
             }
         }
@@ -851,6 +960,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for Engine {
             && state.pointer.is_none()
         {
             state.pointer = Some(seat.get_pointer(qh, ()));
+            state.ensure_cursor_shape_device(qh);
         }
     }
 }
@@ -863,26 +973,33 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Engine {
         event: wl_pointer::Event,
         _: &(),
         conn: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         match event {
             wl_pointer::Event::Enter {
+                serial,
                 surface,
                 surface_x,
                 surface_y,
-                ..
             } if state.popup_surface.as_ref() == Some(&surface) => {
-                state.pointer_moved(surface_x, surface_y);
+                // Each enter needs its own cursor, named by this serial
+                state.pointer_enter_serial = Some(serial);
+                state.cursor_shape = None;
+                state.pointer_moved(surface_x, surface_y, qh);
             }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                state.pointer_moved(surface_x, surface_y);
+                state.pointer_moved(surface_x, surface_y, qh);
             }
             wl_pointer::Event::Leave { .. } => {
-                state.pointer_pos = None;
+                state.pointer_enter_serial = None;
+                state.cursor_shape = None;
+                if state.forget_pointer() {
+                    state.redraw_current(qh);
+                }
             }
             // Take the word on the press. Hyprland keeps the pointer on the popup while the
             // button is held, so the release comes here too, and is ignored.
@@ -892,10 +1009,35 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Engine {
                 state: WEnum::Value(wl_pointer::ButtonState::Pressed),
                 ..
             } => {
-                state.click_bar(time, conn);
+                state.press_popup(time, conn);
             }
             _ => {}
         }
+    }
+}
+
+// Cursor shape: requests only, the compositor sends no events
+impl Dispatch<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1, ()> for Engine {
+    fn event(
+        _: &mut Self,
+        _: &wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+        _: wp_cursor_shape_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1, ()> for Engine {
+    fn event(
+        _: &mut Self,
+        _: &wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
+        _: wp_cursor_shape_device_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
     }
 }
 
@@ -1082,7 +1224,9 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for Engine {
                 // Hyprland places the popup again at the app's caret before every done, and
                 // sends no pointer event when that slides it under a pointer that stays still.
                 // A click then needs a fresh position, or it could take the wrong pill.
-                state.pointer_pos = None;
+                if state.forget_pointer() {
+                    state.redraw_current(qh);
+                }
 
                 // The update is complete: whether the field is secret first, then its text
                 if let Some(secret) = state.pending_secret.take() {
@@ -1414,6 +1558,13 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cursor_is_a_hand_over_a_suggestion() {
+        assert_eq!(cursor_shape_at(Some(0)), CursorShape::Pointer);
+        assert_eq!(cursor_shape_at(Some(4)), CursorShape::Pointer);
+        assert_eq!(cursor_shape_at(None), CursorShape::Default);
+    }
 
     #[test]
     fn test_click_right_after_the_bar_changes_is_ignored() {

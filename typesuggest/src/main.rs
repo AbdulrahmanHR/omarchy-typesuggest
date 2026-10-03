@@ -248,6 +248,11 @@ fn print_help() {
     );
     println!("    trailing_space = true | false    Add a space after the committed word (true)");
     println!(
+        "    hover_highlight = true | false   Highlight the suggestion under the mouse (true)"
+    );
+    println!("    mouse_hides_bar = true | false   Above the caret: hide the bar when the mouse");
+    println!("                                     moves over the area above it (false)");
+    println!(
         "    disabled_apps = code, steam*     Window classes where typesuggest stays off (none)"
     );
     println!("    typo_correction = true | false   Suggest similar words for typos (true)");
@@ -268,7 +273,8 @@ fn print_help() {
         "    - Press an accept key (Enter, Space, or Tab by default) to commit the selected word"
     );
     println!("      (swallowing the key); any other key leaves navigation and reaches the app");
-    println!("    - Or click a suggestion with the left mouse button to commit it straight away");
+    println!("    - Or click a suggestion with the left mouse button to commit it straight away;");
+    println!("      the one under the mouse is highlighted (hover_highlight)");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -546,6 +552,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  - Trailing space: {}",
         if config.trailing_space { "on" } else { "off" }
+    );
+    println!(
+        "  - Hover highlight: {}",
+        if config.hover_highlight { "on" } else { "off" }
+    );
+    println!(
+        "  - Mouse hides bar (above): {}",
+        if config.mouse_hides_bar { "on" } else { "off" }
     );
     println!(
         "  - Typo correction: {}",

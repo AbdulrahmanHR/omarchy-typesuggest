@@ -753,6 +753,23 @@ impl StateMachine {
         self.handle_typing_key(keysym, ch, dict)
     }
 
+    /// Point the highlight at candidate `index` while the keyboard is in the bar, as Left and
+    /// Right would, so an accept key takes the word the mouse hovers. Returns whether it did;
+    /// before the select key, or past the last candidate, nothing changes.
+    pub fn select_while_navigating(&mut self, index: usize) -> bool {
+        match &mut self.mode {
+            InputMode::Navigating {
+                candidates,
+                selected_index,
+                ..
+            } if index < candidates.len() => {
+                *selected_index = index;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Commit candidate `index` of the suggestions on the bar, highlighted or not, the way an
     /// accept key commits the highlighted one: only the word or identifier segment at the
     /// caret is replaced, with a trailing space unless the identifier goes on after it. A
@@ -2071,6 +2088,28 @@ mod tests {
             sm.handle_key_press('o' as u32, Some('o'), false, &dict);
             sm.handle_key_press(KEY_DOWN, None, false, &dict);
         }
+    }
+
+    #[test]
+    fn test_hover_moves_the_selection_only_while_navigating() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        for c in "pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        // Before the select key the mouse only draws a highlight; keys keep typing
+        assert!(!sm.select_while_navigating(1));
+        assert!(matches!(sm.mode, InputMode::Suggesting { .. }));
+
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        assert!(sm.select_while_navigating(2));
+        assert!(!sm.select_while_navigating(3), "past the last candidate");
+        // An accept key now takes the hovered word
+        let act = sm.handle_key_press(KEY_TAB, None, false, &dict);
+        assert!(
+            matches!(&act, KeyAction::CommitCandidate { chosen_word, .. } if chosen_word == "progress"),
+            "{act:?}"
+        );
     }
 
     #[test]

@@ -27,6 +27,8 @@ Panel {
   //   select         Up, Down (only when typesuggest reports select_key)
   //   keys           Enter, Space, Tab
   //   learn, typo    switch rows
+  //   hover          switch row (when typesuggest reports hover_highlight)
+  //   mousehide      switch row (likewise, and only with the bar above the caret)
   //   clear, config  action rows
   // Mouse hover moves the same cursor, so one highlight shows at a time.
   property string focusSection: "header"
@@ -93,6 +95,10 @@ Panel {
   readonly property bool selectKeySupported: root.config.select_key === "up" || root.config.select_key === "down"
   readonly property string selectKeyLabel: root.config.select_key === "down" ? "Down" : "Up"
   readonly property string backKeyLabel: root.config.select_key === "down" ? "Up" : "Down"
+  // Older typesuggest builds report no mouse settings
+  readonly property bool mouseSettingsSupported: typeof root.config.hover_highlight === "boolean"
+    && typeof root.config.mouse_hides_bar === "boolean"
+  readonly property bool showMouseHidesBar: mouseSettingsSupported && root.config.bar_position === "above"
 
   readonly property var sections: {
     if (!typesuggest.probed) return []
@@ -102,6 +108,8 @@ Panel {
       list = list.concat(["look", "size", "count"])
       if (selectKeySupported) list.push("select")
       list = list.concat(["keys", "learn", "typo"])
+      if (mouseSettingsSupported) list.push("hover")
+      if (showMouseHidesBar) list.push("mousehide")
     }
     list.push("clear")
     list.push("config")
@@ -177,6 +185,8 @@ Panel {
     else if (focusSection === "keys") typesuggest.toggleAcceptKey(Model.acceptKeyNames()[i])
     else if (focusSection === "learn") typesuggest.setOption("learn", !root.config.learn)
     else if (focusSection === "typo") typesuggest.setOption("typo_correction", !root.config.typo_correction)
+    else if (focusSection === "hover") typesuggest.setOption("hover_highlight", !root.config.hover_highlight)
+    else if (focusSection === "mousehide") typesuggest.setOption("mouse_hides_bar", !root.config.mouse_hides_bar)
     else if (focusSection === "clear") openClearConfirm()
     else if (focusSection === "config") openConfigFile()
   }
@@ -620,6 +630,28 @@ Panel {
               caption: "Suggest close words when nothing matches"
               checked: root.config.typo_correction
               onToggled: typesuggest.setOption("typo_correction", !root.config.typo_correction)
+            }
+
+            SwitchRow {
+              visible: root.mouseSettingsSupported
+              width: parent.width
+              section: "hover"
+              title: "Hover highlight"
+              caption: "Highlight the suggestion under the mouse"
+              checked: root.config.hover_highlight === true
+              onToggled: typesuggest.setOption("hover_highlight", !root.config.hover_highlight)
+            }
+
+            // Only matters with the bar above the caret, where an empty area above it takes
+            // the mouse while it shows
+            SwitchRow {
+              visible: root.showMouseHidesBar
+              width: parent.width
+              section: "mousehide"
+              title: "Hide on mouse"
+              caption: "Hide the bar when the mouse moves over the area above it"
+              checked: root.config.mouse_hides_bar === true
+              onToggled: typesuggest.setOption("mouse_hides_bar", !root.config.mouse_hides_bar)
             }
           }
 

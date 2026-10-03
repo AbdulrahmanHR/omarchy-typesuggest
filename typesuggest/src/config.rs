@@ -26,6 +26,11 @@ pub struct Config {
     pub accept_keys: AcceptKeys,
     /// Append a space after a committed word
     pub trailing_space: bool,
+    /// Highlight the suggestion under the mouse the way the keyboard selection is drawn
+    pub hover_highlight: bool,
+    /// With `bar_position = "above"`: hide the bar as soon as the mouse moves over the empty
+    /// area above it, rather than when that area is clicked
+    pub mouse_hides_bar: bool,
     /// Lowercase Hyprland window classes (a trailing `*` matches any suffix) where typesuggest
     /// stays out of the way
     pub disabled_apps: Vec<String>,
@@ -167,6 +172,8 @@ const SETTABLE_KEYS: &[(&str, &[&str])] = &[
     ("select_key", &[]),
     ("accept_keys", &[]),
     ("trailing_space", &[]),
+    ("hover_highlight", &[]),
+    ("mouse_hides_bar", &[]),
     ("typo_correction", &[]),
     ("disabled_apps", &[]),
     ("font", &[]),
@@ -194,7 +201,9 @@ pub fn config_line(key: &str, value: &str) -> Result<String, String> {
     };
 
     let stored = match key {
-        "learn" | "trailing_space" | "typo_correction" => parse_bool()?.to_string(),
+        "learn" | "trailing_space" | "typo_correction" | "hover_highlight" | "mouse_hides_bar" => {
+            parse_bool()?.to_string()
+        }
         "min_prefix_length" | "max_candidates" => {
             let max = if key == "max_candidates" { 5 } else { 10 };
             let n = value.parse::<usize>().map_err(|_| invalid())?;
@@ -334,6 +343,8 @@ impl Default for Config {
             select_key: SelectKey::Up,
             accept_keys: AcceptKeys::default(),
             trailing_space: true,
+            hover_highlight: true,
+            mouse_hides_bar: false,
             disabled_apps: Vec::new(),
             typo_correction: true,
             font: String::new(),
@@ -419,6 +430,16 @@ impl Config {
                             self.trailing_space = b;
                         }
                     }
+                    "hover_highlight" => {
+                        if let Ok(b) = val.parse::<bool>() {
+                            self.hover_highlight = b;
+                        }
+                    }
+                    "mouse_hides_bar" => {
+                        if let Ok(b) = val.parse::<bool>() {
+                            self.mouse_hides_bar = b;
+                        }
+                    }
                     "disabled_apps" => {
                         self.disabled_apps = parse_list(&raw_val)
                             .into_iter()
@@ -454,7 +475,7 @@ impl Config {
         };
         let apps: Vec<&str> = self.disabled_apps.iter().map(String::as_str).collect();
         format!(
-            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"trailing_space\":{},\"typo_correction\":{},\"disabled_apps\":{},\"font\":{}}}",
+            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"trailing_space\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"disabled_apps\":{},\"font\":{}}}",
             self.learn,
             self.min_prefix_length,
             self.max_candidates,
@@ -464,6 +485,8 @@ impl Config {
             json_string(self.select_key.name()),
             list(&self.accept_keys.names()),
             self.trailing_space,
+            self.hover_highlight,
+            self.mouse_hides_bar,
             self.typo_correction,
             list(&apps),
             json_string(&self.font),
@@ -496,9 +519,9 @@ max_candidates = 3
 bar_scale = 1.0
 
 # Where the bar appears (default: "below"): "below" or "above" the text caret.
-# Near the bottom of the screen the bar always goes above. With "above", moving the mouse over
-# the empty area above the bar hides it so it never gets in the way of clicks; the bar itself
-# can still be clicked, reaching it from below or from the side.
+# Near the bottom of the screen the bar always goes above. With "above", the empty area above
+# the bar takes the mouse while the bar shows: a click there hides the bar (click the text
+# again), or set mouse_hides_bar below to hide it as soon as the mouse moves there.
 bar_position = "below"
 
 # Bar colors (default: "omarchy"): "omarchy" follows the current Omarchy theme and falls back to
@@ -524,6 +547,14 @@ accept_keys = enter, space, tab
 
 # Insert a space after the committed word (default: true)
 trailing_space = true
+
+# Highlight the suggestion under the mouse, the way the keyboard selection is shown
+# (default: true). A click takes the word under the mouse either way.
+hover_highlight = true
+
+# With bar_position = "above": hide the bar as soon as the mouse moves over the empty area
+# above it, so a click there always reaches the text (default: false, hide only on a click)
+mouse_hides_bar = false
 
 # Hyprland window classes where typesuggest stays off, case-insensitive (default: none)
 # A trailing * matches any suffix, e.g. disabled_apps = code, org.wezfurlong.wezterm, steam*
@@ -646,6 +677,8 @@ mod tests {
         assert_eq!(cfg.theme, Theme::Omarchy);
         assert_eq!(cfg.colors, ColorOverrides::default());
         assert_eq!(cfg.select_key, SelectKey::Up);
+        assert!(cfg.hover_highlight);
+        assert!(!cfg.mouse_hides_bar);
         assert_eq!(cfg.accept_keys, AcceptKeys::default());
         assert!(cfg.trailing_space);
         assert!(cfg.disabled_apps.is_empty());
@@ -674,6 +707,8 @@ mod tests {
             color_background = #10203040
             color_text = "not a color"
             trailing_space = false
+            hover_highlight = false
+            mouse_hides_bar = true
             typo_correction = false
             font = "JetBrains Mono"
         "##;
@@ -687,6 +722,8 @@ mod tests {
         assert_eq!(cfg.colors.background, Some(Rgba::new(16, 32, 48, 64)));
         assert_eq!(cfg.colors.text, None);
         assert!(!cfg.trailing_space);
+        assert!(!cfg.hover_highlight);
+        assert!(cfg.mouse_hides_bar);
         assert!(!cfg.typo_correction);
         assert_eq!(cfg.font, "JetBrains Mono");
     }
@@ -717,6 +754,15 @@ mod tests {
             "select_key = \"down\""
         );
         assert!(config_line("select_key", "left").is_err());
+        assert_eq!(
+            config_line("hover_highlight", "off").unwrap(),
+            "hover_highlight = false"
+        );
+        assert_eq!(
+            config_line("mouse_hides_bar", "yes").unwrap(),
+            "mouse_hides_bar = true"
+        );
+        assert!(config_line("mouse_hides_bar", "sometimes").is_err());
         assert_eq!(
             config_line("accept_keys", "tab, Return").unwrap(),
             "accept_keys = [\"enter\", \"tab\"]"
@@ -776,6 +822,7 @@ mod tests {
             json.contains("\"select_key\":\"up\",\"accept_keys\":[\"enter\",\"space\",\"tab\"]")
         );
         assert!(json.contains("\"disabled_apps\":[\"code\"]"));
+        assert!(json.contains("\"hover_highlight\":true,\"mouse_hides_bar\":false"));
         assert!(json.ends_with("\"font\":\"My \\\"Font\\\"\"}"));
     }
 

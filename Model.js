@@ -33,6 +33,8 @@ function defaultConfig() {
     select_key: "up",
     accept_keys: acceptKeyNames(),
     trailing_space: true,
+    hover_highlight: true,
+    mouse_hides_bar: false,
     typo_correction: true
   }
 }
@@ -76,6 +78,10 @@ function normalizeConfig(data) {
     select_key: data.select_key === undefined ? null : pick(data.select_key, selectKeys(), base.select_key),
     accept_keys: normalizeAcceptKeys(data.accept_keys),
     trailing_space: typeof data.trailing_space === "boolean" ? data.trailing_space : base.trailing_space,
+    // null when the installed typesuggest predates these mouse settings (before 1.2.1),
+    // so the panel leaves out rows that build would refuse
+    hover_highlight: typeof data.hover_highlight === "boolean" ? data.hover_highlight : null,
+    mouse_hides_bar: typeof data.mouse_hides_bar === "boolean" ? data.mouse_hides_bar : null,
     typo_correction: typeof data.typo_correction === "boolean" ? data.typo_correction : base.typo_correction
   }
 }
