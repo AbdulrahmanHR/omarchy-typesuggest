@@ -1,4 +1,4 @@
-use crate::config::{AcceptKeys, Config};
+use crate::config::{AcceptKeys, Config, SelectKey};
 use crate::dict::{Context, Dictionary};
 
 // Standard XKB keysym constants
@@ -419,6 +419,8 @@ pub struct StateMachine {
     pub buffer: InputBuffer,
     pub max_candidates: usize,
     pub min_prefix_length: usize,
+    /// Arrow key that enters navigation while suggestions are shown
+    pub select_key: SelectKey,
     /// Keys that commit the highlighted candidate while navigating
     pub accept_keys: AcceptKeys,
     /// Append a space after the committed word
@@ -442,6 +444,7 @@ impl StateMachine {
             buffer: InputBuffer::new(),
             max_candidates,
             min_prefix_length: 1,
+            select_key: SelectKey::default(),
             accept_keys: AcceptKeys::default(),
             trailing_space: true,
             last_suggestion: None,
@@ -452,6 +455,7 @@ impl StateMachine {
     pub fn apply_config(&mut self, config: &Config) {
         self.max_candidates = config.max_candidates;
         self.min_prefix_length = config.min_prefix_length.max(1);
+        self.select_key = config.select_key;
         self.accept_keys = config.accept_keys;
         self.trailing_space = config.trailing_space;
         self.invalidate_suggestions();
@@ -480,13 +484,21 @@ impl StateMachine {
     }
 
     /// Whether `handle_key_press` might swallow this key instead of letting it reach the app.
-    /// Only keys pressed while navigating, and Up while suggestions are shown (it starts
-    /// navigating), can be swallowed; every other key is forwarded whatever it does here.
+    /// Only keys pressed while navigating, and the select key while suggestions are shown (it
+    /// starts navigating), can be swallowed; every other key is forwarded whatever it does here.
     pub fn may_swallow(&self, keysym: u32, ctrl_active: bool) -> bool {
         match self.mode {
             InputMode::Navigating { .. } => true,
-            InputMode::Suggesting { .. } => keysym == KEY_UP && !ctrl_active,
+            InputMode::Suggesting { .. } => keysym == self.select_keysym() && !ctrl_active,
             InputMode::Idle => false,
+        }
+    }
+
+    /// The keysym of the configured `select_key`
+    fn select_keysym(&self) -> u32 {
+        match self.select_key {
+            SelectKey::Up => KEY_UP,
+            SelectKey::Down => KEY_DOWN,
         }
     }
 
@@ -755,23 +767,26 @@ impl StateMachine {
 
     /// 3. Normal typing & navigation keys (anything not handled as a shortcut or navigation key)
     fn handle_typing_key(&mut self, keysym: u32, ch: Option<char>, dict: &Dictionary) -> KeyAction {
+        // The select key (Up unless configured as Down) enters navigation while suggestions
+        // are shown; otherwise it moves the caret like the other arrow
+        if keysym == self.select_keysym()
+            && let InputMode::Suggesting { candidates, .. } = &self.mode
+            && !candidates.is_empty()
+        {
+            let c = candidates.clone();
+            let (prefix, _) = self.buffer.current_word_prefix_and_prev();
+            self.mode = InputMode::Navigating {
+                prefix,
+                suffix: self.buffer.current_word_suffix(),
+                candidates: c,
+                selected_index: 0,
+            };
+            return KeyAction::UpdateSelection { index: 0 };
+        }
+
         match keysym {
             KEY_UP => {
-                // If in Suggesting mode with candidates, Up enters navigation!
-                if let InputMode::Suggesting { candidates, .. } = &self.mode
-                    && !candidates.is_empty()
-                {
-                    let c = candidates.clone();
-                    let (prefix, _) = self.buffer.current_word_prefix_and_prev();
-                    self.mode = InputMode::Navigating {
-                        prefix,
-                        suffix: self.buffer.current_word_suffix(),
-                        candidates: c,
-                        selected_index: 0,
-                    };
-                    return KeyAction::UpdateSelection { index: 0 };
-                }
-                // Otherwise user pressed Up in document: clear line buffer and pass through
+                // Up in the document: clear line buffer and pass through
                 self.buffer.clear();
                 self.mode = InputMode::Idle;
                 KeyAction::PassThrough
@@ -1811,28 +1826,78 @@ mod tests {
         ])
         .collect();
 
-        for ctrl in [false, true] {
-            for &(key, ch) in &keys {
-                // Idle, Suggesting and Navigating, all reached by typing "pro"
-                for setup in 0..3 {
-                    let mut sm = StateMachine::new(3);
-                    if setup >= 1 {
-                        for c in "pro".chars() {
-                            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        for (select_key, select) in [(SelectKey::Up, KEY_UP), (SelectKey::Down, KEY_DOWN)] {
+            for ctrl in [false, true] {
+                for &(key, ch) in &keys {
+                    // Idle, Suggesting and Navigating, all reached by typing "pro"
+                    for setup in 0..3 {
+                        let mut sm = StateMachine::new(3);
+                        sm.select_key = select_key;
+                        if setup >= 1 {
+                            for c in "pro".chars() {
+                                sm.handle_key_press(c as u32, Some(c), false, &dict);
+                            }
                         }
+                        if setup == 2 {
+                            sm.handle_key_press(select, None, false, &dict);
+                        }
+                        let may = sm.may_swallow(key, ctrl);
+                        let act = sm.handle_key_press(key, ch, ctrl, &dict);
+                        assert!(
+                            may || !is_swallowed(&act),
+                            "{select_key:?} key {key:#x} ctrl={ctrl} setup={setup} swallowed via {act:?}"
+                        );
                     }
-                    if setup == 2 {
-                        sm.handle_key_press(KEY_UP, None, false, &dict);
-                    }
-                    let may = sm.may_swallow(key, ctrl);
-                    let act = sm.handle_key_press(key, ch, ctrl, &dict);
-                    assert!(
-                        may || !is_swallowed(&act),
-                        "key {key:#x} ctrl={ctrl} setup={setup} swallowed via {act:?}"
-                    );
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_select_key_down_enters_the_bar_and_up_moves_the_caret() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        sm.select_key = SelectKey::Down;
+        for c in "pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        // Up is an ordinary arrow now: it leaves the suggestions and reaches the app
+        assert!(!sm.may_swallow(KEY_UP, false));
+        let act = sm.handle_key_press(KEY_UP, None, false, &dict);
+        assert!(!is_swallowed(&act), "{act:?}");
+        assert_eq!(sm.mode, InputMode::Idle);
+
+        for c in "pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        assert!(sm.may_swallow(KEY_DOWN, false));
+        let act = sm.handle_key_press(KEY_DOWN, None, false, &dict);
+        assert_eq!(act, KeyAction::UpdateSelection { index: 0 });
+        sm.handle_key_press(KEY_TAB, None, false, &dict);
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "program ");
+
+        // Either arrow still backs out of the bar
+        for back in [KEY_UP, KEY_DOWN] {
+            for c in " pro".chars() {
+                sm.handle_key_press(c as u32, Some(c), false, &dict);
+            }
+            sm.handle_key_press(KEY_DOWN, None, false, &dict);
+            assert_eq!(
+                sm.handle_key_press(back, None, false, &dict),
+                KeyAction::CancelNavigation
+            );
+        }
+    }
+
+    #[test]
+    fn test_select_key_follows_the_config() {
+        let mut sm = StateMachine::new(3);
+        let config = Config {
+            select_key: SelectKey::Down,
+            ..Config::default()
+        };
+        sm.apply_config(&config);
+        assert_eq!(sm.select_key, SelectKey::Down);
     }
 
     #[test]

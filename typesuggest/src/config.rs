@@ -20,6 +20,8 @@ pub struct Config {
     pub theme: Theme,
     /// `color_*` overrides applied on top of the theme
     pub colors: ColorOverrides,
+    /// Key that moves from the document into the suggestion bar
+    pub select_key: SelectKey,
     /// Keys that commit the highlighted suggestion while navigating
     pub accept_keys: AcceptKeys,
     /// Append a space after a committed word
@@ -90,6 +92,31 @@ impl BarPosition {
     }
 }
 
+/// The arrow key that moves from the document into the suggestion bar (`select_key`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectKey {
+    #[default]
+    Up,
+    Down,
+}
+
+impl SelectKey {
+    pub fn parse(val: &str) -> Option<Self> {
+        match val.trim().to_lowercase().as_str() {
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
+}
+
 /// Parse a suggestion bar size multiplier, clamped to the supported range
 pub fn parse_bar_scale(val: &str) -> Option<f32> {
     val.trim()
@@ -137,6 +164,7 @@ const SETTABLE_KEYS: &[(&str, &[&str])] = &[
     ("bar_scale", &["scale", "size"]),
     ("bar_position", &["position"]),
     ("theme", &[]),
+    ("select_key", &[]),
     ("accept_keys", &[]),
     ("trailing_space", &[]),
     ("typo_correction", &[]),
@@ -187,6 +215,11 @@ pub fn config_line(key: &str, value: &str) -> Result<String, String> {
         }
         "bar_position" => quoted(BarPosition::parse(value).ok_or_else(invalid)?.name())?,
         "theme" => quoted(Theme::parse(value).ok_or_else(invalid)?.name())?,
+        "select_key" => quoted(
+            SelectKey::parse(value)
+                .ok_or_else(|| "select_key takes up or down".to_string())?
+                .name(),
+        )?,
         "accept_keys" => {
             let names = parse_list(value);
             let known = |n: &String| {
@@ -298,6 +331,7 @@ impl Default for Config {
             bar_position: BarPosition::Below,
             theme: Theme::Omarchy,
             colors: ColorOverrides::default(),
+            select_key: SelectKey::Up,
             accept_keys: AcceptKeys::default(),
             trailing_space: true,
             disabled_apps: Vec::new(),
@@ -372,6 +406,11 @@ impl Config {
                             self.theme = theme;
                         }
                     }
+                    "select_key" => {
+                        if let Some(key) = SelectKey::parse(val) {
+                            self.select_key = key;
+                        }
+                    }
                     "accept_keys" => {
                         self.accept_keys = parse_accept_keys(&raw_val).unwrap_or_default();
                     }
@@ -415,13 +454,14 @@ impl Config {
         };
         let apps: Vec<&str> = self.disabled_apps.iter().map(String::as_str).collect();
         format!(
-            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"accept_keys\":{},\"trailing_space\":{},\"typo_correction\":{},\"disabled_apps\":{},\"font\":{}}}",
+            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"trailing_space\":{},\"typo_correction\":{},\"disabled_apps\":{},\"font\":{}}}",
             self.learn,
             self.min_prefix_length,
             self.max_candidates,
             self.bar_scale,
             json_string(self.bar_position.name()),
             json_string(self.theme.name()),
+            json_string(self.select_key.name()),
             list(&self.accept_keys.names()),
             self.trailing_space,
             self.typo_correction,
@@ -473,8 +513,12 @@ color_text = ""
 color_accent = ""
 color_accent_text = ""
 
-# Keys that commit the highlighted suggestion after pressing Up (default: enter, space, tab)
-# Any other key leaves the suggestions and reaches the app as usual.
+# Arrow key that moves into the suggestion bar while it is showing (default: "up"): "up" or
+# "down". Left/Right then move between suggestions; Up, Down or Escape go back to the text.
+select_key = "up"
+
+# Keys that commit the highlighted suggestion after pressing the select key
+# (default: enter, space, tab). Any other key leaves the suggestions and reaches the app as usual.
 accept_keys = enter, space, tab
 
 # Insert a space after the committed word (default: true)
@@ -600,6 +644,7 @@ mod tests {
         assert_eq!(cfg.bar_scale, 1.0);
         assert_eq!(cfg.theme, Theme::Omarchy);
         assert_eq!(cfg.colors, ColorOverrides::default());
+        assert_eq!(cfg.select_key, SelectKey::Up);
         assert_eq!(cfg.accept_keys, AcceptKeys::default());
         assert!(cfg.trailing_space);
         assert!(cfg.disabled_apps.is_empty());
@@ -667,6 +712,11 @@ mod tests {
         );
         assert_eq!(config_line("learn", "off").unwrap(), "learn = false");
         assert_eq!(
+            config_line("select_key", "Down").unwrap(),
+            "select_key = \"down\""
+        );
+        assert!(config_line("select_key", "left").is_err());
+        assert_eq!(
             config_line("accept_keys", "tab, Return").unwrap(),
             "accept_keys = [\"enter\", \"tab\"]"
         );
@@ -721,7 +771,9 @@ mod tests {
         assert!(json.starts_with(
             "{\"learn\":true,\"min_prefix_length\":1,\"max_candidates\":3,\"bar_scale\":1,"
         ));
-        assert!(json.contains("\"accept_keys\":[\"enter\",\"space\",\"tab\"]"));
+        assert!(
+            json.contains("\"select_key\":\"up\",\"accept_keys\":[\"enter\",\"space\",\"tab\"]")
+        );
         assert!(json.contains("\"disabled_apps\":[\"code\"]"));
         assert!(json.ends_with("\"font\":\"My \\\"Font\\\"\"}"));
     }
@@ -740,6 +792,21 @@ mod tests {
         );
         cfg.parse_str("position = below\n");
         assert_eq!(cfg.bar_position, BarPosition::Below);
+    }
+
+    #[test]
+    fn test_select_key() {
+        let mut cfg = Config::default();
+        cfg.parse_str("select_key = \"Down\"\n");
+        assert_eq!(cfg.select_key, SelectKey::Down);
+        cfg.parse_str("select_key = sideways\n");
+        assert_eq!(
+            cfg.select_key,
+            SelectKey::Down,
+            "invalid values are ignored"
+        );
+        cfg.parse_str("select_key = up\n");
+        assert_eq!(cfg.select_key, SelectKey::Up);
     }
 
     #[test]

@@ -8,7 +8,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
 
 - **Exact Windows Text Suggestions UX:**
   - Floats a compact 3-pill suggestion bar just below the text caret (above it near the bottom of the screen), starting from the very 1st letter typed.
-  - **Press `Up`**: Enters suggestion navigation mode without moving the document caret.
+  - **Press `Up`** (or `Down`, with `select_key = "down"`): Enters suggestion navigation mode without moving the document caret.
   - **Press `Left` / `Right`**: Cycles between the suggestion pills.
   - **Press `Down`, `Escape`, or `Up`**: Cancels suggestion navigation and returns focus directly to the document caret (swallowing the key).
   - **Press `Enter`, `Space`, or `Tab`**: Commits the chosen candidate + trailing space and **swallows the keystroke** (preventing accidental message sending in chat apps like Discord, Slack, WhatsApp, Notion, etc.). Which keys commit and whether a space follows are configurable.
@@ -156,15 +156,15 @@ systemctl --user restart typesuggest.service
 | Key | When Idle / Typing | When in Suggestions Navigation (`Up` active) |
 |---|---|---|
 | **Letters / Numbers** | Types normally into application | Leaves navigation and types normally |
-| **`Up`** | **Enters suggestions navigation** (highlights pill 1) | **Cancels navigation** (swallowed) |
+| **`Up`** | **Enters suggestions navigation** (highlights pill 1); with `select_key = "down"` it moves the caret up instead | **Cancels navigation** (swallowed) |
 | **`Right`** | Moves caret right in document | Cycles to next suggestion pill |
 | **`Left`** | Moves caret left in document | Cycles to previous suggestion pill |
-| **`Down` / `Escape`** | Moves caret down / unfocuses | **Cancels navigation** (returns to caret without moving, swallowed) |
+| **`Down` / `Escape`** | Moves caret down / unfocuses; with `select_key = "down"`, `Down` **enters suggestions navigation** instead | **Cancels navigation** (returns to caret without moving, swallowed) |
 | **`Enter` / `Return`** | Inserts newline / submits in app | **Commits candidate + space** (swallowed, zero accidental chat sends) |
 | **`Space`** | Inserts space in document | **Commits candidate + space** (swallowed) |
 | **`Tab`** | Indents / tabs in app | **Commits candidate + space** (swallowed) |
 
-The keys that commit (`accept_keys`) and the space after the word (`trailing_space`) can be changed in the configuration. A key left out of `accept_keys` ends navigation and reaches the app as usual, so with `accept_keys = space, tab` Enter always sends your message.
+The key that enters navigation (`select_key`, `Up` or `Down`), the keys that commit (`accept_keys`) and the space after the word (`trailing_space`) can be changed in the configuration. A key left out of `accept_keys` ends navigation and reaches the app as usual, so with `accept_keys = space, tab` Enter always sends your message.
 
 ---
 
@@ -203,7 +203,10 @@ color_text = ""
 color_accent = ""
 color_accent_text = ""
 
-# Keys that commit the highlighted suggestion after pressing Up (default: enter, space, tab)
+# Arrow key that moves into the suggestions while they show: "up" or "down" (default: "up")
+select_key = "up"
+
+# Keys that commit the highlighted suggestion after the select key (default: enter, space, tab)
 accept_keys = enter, space, tab
 
 # Insert a space after the committed word (default: true)
@@ -228,6 +231,7 @@ font = ""
 | `bar_position` | `"below"` | `"below"` or `"above"` the caret. Near the bottom of the screen the bar always goes above. With `"above"`, moving the mouse over the area above the caret hides the bar so it never blocks clicks (Hyprland gives that area to the input method while the bar is shown). |
 | `theme` | `"omarchy"` | `"omarchy"` takes the bar colors from the current Omarchy theme (`$XDG_STATE_HOME/omarchy/current/theme/colors.toml`) and follows theme switches automatically, falling back to the built-in palette when no Omarchy theme is found. `"default"` always uses the built-in dark teal palette. |
 | `color_background`, `color_border`, `color_pill`, `color_pill_border`, `color_text`, `color_accent`, `color_accent_text` | unset | Override single colors (bar background and border, unselected pill background, border and text, selected pill background and text) as `"#rrggbb"` or `"#rrggbbaa"`. Invalid values are ignored. |
+| `select_key` | `"up"` | Arrow key that moves into the suggestions while they show: `"up"` or `"down"`. The other arrow then moves the caret as usual. In navigation, `Up`, `Down` and `Escape` all go back to the text. |
 | `accept_keys` | `enter, space, tab` | Keys that commit the highlighted suggestion. Any of `enter`, `space`, `tab`; also written as `["enter", "tab"]`. Other keys end navigation and reach the app. |
 | `trailing_space` | `true` | Add a space after the committed word. The accept key itself is still swallowed. |
 | `disabled_apps` | none | Window classes where TypeSuggest does nothing at all, e.g. `code, org.wezfurlong.wezterm` or `["code", "steam*"]`. Matching is case-insensitive and a trailing `*` matches any suffix. Find a window's class with `hyprctl activewindow`. |

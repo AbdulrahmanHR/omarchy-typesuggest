@@ -75,12 +75,19 @@ Panel {
     ? typesuggest.actionStatus
     : (typesuggest.lastError !== "" ? typesuggest.lastError : typesuggest.configError)
   readonly property bool statusIsError: typesuggest.actionStatus === "" && statusText !== ""
+  // Older typesuggest builds report no select_key and always use Up
+  readonly property bool selectKeySupported: root.config.select_key === "up" || root.config.select_key === "down"
+  readonly property string selectKeyLabel: root.config.select_key === "down" ? "Down" : "Up"
 
   readonly property var sections: {
     if (!typesuggest.probed) return []
     if (!typesuggest.installed) return ["install"]
     var list = ["header"]
-    if (settingsReady) list = list.concat(["look", "size", "count", "keys", "learn", "typo"])
+    if (settingsReady) {
+      list = list.concat(["look", "size", "count"])
+      if (selectKeySupported) list.push("select")
+      list = list.concat(["keys", "learn", "typo"])
+    }
     list.push("clear")
     list.push("config")
     return list
@@ -89,6 +96,7 @@ Panel {
   function sectionCount(section) {
     if (section === "look") return 4
     if (section === "count") return 5
+    if (section === "select") return 2
     if (section === "keys") return 3
     return 1
   }
@@ -97,6 +105,7 @@ Panel {
   function landingIndex(section) {
     if (section === "look") return root.config.bar_position === "above" ? 1 : 0
     if (section === "count") return Math.max(0, Math.min(4, root.config.max_candidates - 1))
+    if (section === "select") return root.config.select_key === "down" ? 1 : 0
     return 0
   }
 
@@ -149,6 +158,7 @@ Panel {
       else typesuggest.setOption("theme", Model.themes()[i - 2])
     }
     else if (focusSection === "count") typesuggest.setOption("max_candidates", i + 1)
+    else if (focusSection === "select") typesuggest.setOption("select_key", Model.selectKeys()[i])
     else if (focusSection === "keys") typesuggest.toggleAcceptKey(Model.acceptKeyNames()[i])
     else if (focusSection === "learn") typesuggest.setOption("learn", !root.config.learn)
     else if (focusSection === "typo") typesuggest.setOption("typo_correction", !root.config.typo_correction)
@@ -525,6 +535,19 @@ Panel {
           }
 
           ChoiceGroup {
+            visible: root.settingsReady && root.selectKeySupported
+            width: parent.width
+            title: "SELECT KEY"
+            section: "select"
+            options: [
+              { value: "up", label: "Up", icon: "󰁝" },
+              { value: "down", label: "Down", icon: "󰁅" }
+            ]
+            activeValues: [root.config.select_key]
+            onChosen: function(value) { typesuggest.setOption("select_key", value) }
+          }
+
+          ChoiceGroup {
             visible: root.settingsReady
             width: parent.width
             title: "ACCEPT KEYS"
@@ -536,6 +559,19 @@ Panel {
             ]
             activeValues: root.config.accept_keys
             onChosen: function(value) { typesuggest.toggleAcceptKey(value) }
+          }
+
+          // How the two key rows fit together, since nothing on the bar itself says so
+          Text {
+            visible: root.settingsReady
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "While suggestions show, press " + root.selectKeyLabel
+              + " to highlight one, Left/Right to choose, then an accept key. Up, Down or Esc goes back to the text."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
 
           // ---------- Behavior ----------

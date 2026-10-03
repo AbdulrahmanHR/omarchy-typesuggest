@@ -242,6 +242,7 @@ fn print_help() {
     );
     println!("    color_background, color_border, color_pill, color_pill_border, color_text,");
     println!("    color_accent, color_accent_text  \"#rrggbb\" / \"#rrggbbaa\" overrides (unset)");
+    println!("    select_key = up | down           Arrow key that moves into the suggestions (up)");
     println!(
         "    accept_keys = enter, space, tab  Keys that commit the highlighted word (all three)"
     );
@@ -258,9 +259,9 @@ fn print_help() {
     println!(
         "    - Displays a compact suggestion bar above/at the text caret starting from 1st letter"
     );
-    println!("    - Press Up arrow to navigate into suggestions");
+    println!("    - Press Up arrow (or Down, with select_key = down) to navigate into suggestions");
     println!("    - Press Left / Right arrow to cycle between suggestions");
-    println!("    - Press Down arrow, Escape, or Up arrow again to cancel navigation");
+    println!("    - Press Up arrow, Down arrow, or Escape to cancel navigation");
     println!(
         "    - Press an accept key (Enter, Space, or Tab by default) to commit the selected word"
     );
@@ -537,6 +538,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Bar size: {}x", config.bar_scale);
     println!("  - Bar position: {}", config.bar_position.name());
     println!("  - Theme: {}", config.theme.name());
+    println!("  - Select key: {}", config.select_key.name());
     println!("  - Accept keys: {}", config.accept_keys.names().join(", "));
     println!(
         "  - Trailing space: {}",

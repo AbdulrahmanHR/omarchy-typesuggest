@@ -14,6 +14,10 @@ function positions() {
   return ["below", "above"]
 }
 
+function selectKeys() {
+  return ["up", "down"]
+}
+
 function themes() {
   return ["omarchy", "default"]
 }
@@ -26,6 +30,7 @@ function defaultConfig() {
     bar_scale: 1.0,
     bar_position: "below",
     theme: "omarchy",
+    select_key: "up",
     accept_keys: acceptKeyNames(),
     trailing_space: true,
     typo_correction: true
@@ -66,6 +71,9 @@ function normalizeConfig(data) {
     bar_scale: isFinite(scale) && scale > 0 ? scale : base.bar_scale,
     bar_position: pick(data.bar_position, positions(), base.bar_position),
     theme: pick(data.theme, themes(), base.theme),
+    // null when the installed typesuggest predates select_key, so the panel
+    // can leave out a setting that build would refuse
+    select_key: data.select_key === undefined ? null : pick(data.select_key, selectKeys(), base.select_key),
     accept_keys: normalizeAcceptKeys(data.accept_keys),
     trailing_space: typeof data.trailing_space === "boolean" ? data.trailing_space : base.trailing_space,
     typo_correction: typeof data.typo_correction === "boolean" ? data.typo_correction : base.typo_correction

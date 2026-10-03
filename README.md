@@ -77,6 +77,14 @@ programs, all of which Omarchy already ships except TypeSuggest itself:
 
 ## Using it
 
+While suggestions are showing, press <kbd>Up</kbd> to highlight the first one,
+<kbd>Left</kbd>/<kbd>Right</kbd> to move between them, and <kbd>Enter</kbd>,
+<kbd>Space</kbd> or <kbd>Tab</kbd> to accept. <kbd>Up</kbd>, <kbd>Down</kbd>
+or <kbd>Esc</kbd> backs out. If <kbd>Down</kbd> feels more natural (the bar
+sits below the caret by default), pick it under **Select key** in the panel.
+Both key rows can be changed there; every key is listed under **Controls &
+Keybindings** in [`typesuggest/README.md`](typesuggest/README.md).
+
 - **Left click** the icon: open the panel.
 - **Right click** the icon: turn TypeSuggest on or off.
 
@@ -103,7 +111,7 @@ panel.
 | Does this build support the settings? | `typesuggest --help` |
 | Is it on? | `systemctl --user is-active typesuggest` |
 | Read the settings | `typesuggest --config-json` |
-| Change a setting | `typesuggest --set <key> <value>` with `bar_position`, `bar_scale`, `max_candidates`, `accept_keys`, `learn`, `typo_correction` or `theme` |
+| Change a setting | `typesuggest --set <key> <value>` with `bar_position`, `bar_scale`, `max_candidates`, `select_key`, `accept_keys`, `learn`, `typo_correction` or `theme` |
 | Turn on | `typesuggest --enable-autostart`, then `systemctl --user start typesuggest` |
 | Turn off | `systemctl --user stop typesuggest`, then `typesuggest --disable-autostart` |
 | Clear learned phrases | `typesuggest --clear-learned` (TypeSuggest restarts its service so the daemon forgets them too) |
