@@ -758,20 +758,37 @@ impl Engine {
         self.set_hover(hover, qh);
     }
 
-    /// A left button press on the popup. On a suggestion it takes that word; on the
-    /// transparent part above the bar (bar_position = "above") it hides the bar, since the
-    /// click was meant for the text under it, which can then be clicked again.
-    fn press_popup(&mut self, time: u32, conn: &Connection) {
-        let position = self.pointer_pos;
+    /// Whether the pointer was last seen on the bar itself, rather than on the transparent
+    /// part above it or somewhere unknown since the bar moved
+    fn pointer_on_bar(&self) -> bool {
         let areas = self.bar_areas.as_ref().filter(|_| self.is_popup_visible);
-        let on_bar = matches!((position, areas), (Some((x, y)), Some(a)) if a.on_bar(x, y));
-        if on_bar {
-            self.click_bar(time, conn);
-        } else if self.is_popup_visible && self.config.bar_position == BarPosition::Above {
-            // Unknown position (no motion since the bar moved) counts as off the bar: hiding
-            // costs nothing, while keeping the bar would swallow the click again
+        matches!((self.pointer_pos, areas), (Some((x, y)), Some(a)) if a.on_bar(x, y))
+    }
+
+    /// A button press or a scroll on the transparent part above the bar (bar_position =
+    /// "above") was meant for the text under it, so the bar gets out of the way. Hyprland
+    /// keeps the pointer on the hidden popup until the mouse moves, so the text takes the
+    /// next click once the mouse has moved a little. An unknown position counts as off the
+    /// bar: hiding costs nothing, while keeping the bar would swallow the input again.
+    fn input_off_bar(&mut self) {
+        if self.is_popup_visible
+            && self.config.bar_position == BarPosition::Above
+            && !self.pointer_on_bar()
+        {
             self.state_machine.mode = InputMode::Idle;
             self.hide();
+        }
+    }
+
+    /// A button press on the popup: a left click on a suggestion takes that word, other
+    /// buttons and the bar's padding do nothing, and the transparent part above the bar hides it
+    fn press_popup(&mut self, button: u32, time: u32, conn: &Connection) {
+        if self.pointer_on_bar() {
+            if button == BTN_LEFT {
+                self.click_bar(time, conn);
+            }
+        } else {
+            self.input_off_bar();
         }
     }
 
@@ -1001,15 +1018,19 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Engine {
                     state.redraw_current(qh);
                 }
             }
-            // Take the word on the press. Hyprland keeps the pointer on the popup while the
-            // button is held, so the release comes here too, and is ignored.
+            // Act on the press. Hyprland keeps the pointer on the popup while the button is
+            // held, so the release comes here too, and is ignored.
             wl_pointer::Event::Button {
                 time,
-                button: BTN_LEFT,
+                button,
                 state: WEnum::Value(wl_pointer::ButtonState::Pressed),
                 ..
             } => {
-                state.press_popup(time, conn);
+                state.press_popup(button, time, conn);
+            }
+            // A scroll over the transparent part above the bar was meant for the text there
+            wl_pointer::Event::Axis { .. } => {
+                state.input_off_bar();
             }
             _ => {}
         }
@@ -1482,6 +1503,8 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             forward!();
                             // Deliver the keystroke before spending time drawing the bar
                             let _ = conn.flush();
+                            // New words may sit under the pointer; the next motion finds it
+                            state.hover_index = None;
                             state.render_and_show(qh, &candidates, None);
                         }
 

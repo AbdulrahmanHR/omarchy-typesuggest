@@ -166,9 +166,9 @@ systemctl --user restart typesuggest.service
 | **`Tab`** | Indents / tabs in app | **Commits candidate + space** (swallowed) |
 | **Left click** on a suggestion | **Commits that suggestion + space** while the bar shows | **Commits that suggestion + space**, whichever pill is highlighted |
 
-Hovering a suggestion highlights it (`hover_highlight = false` turns that off). Before `Up` the highlight only shows what a click would take, and keys type as usual; once you are in navigation, the selection follows the mouse, so an accept key takes the hovered word.
+Hovering a suggestion highlights it. Before the select key (`Up` by default) the highlight only shows what a click would take, and keys type as usual; once you are in navigation, the selection follows the mouse, so an accept key takes the hovered word. With `hover_highlight = false` there is no highlight and the selection does not follow the mouse; the pointer still turns into a hand over a suggestion.
 
-A click within a moment (0.3 s) of the bar appearing or changing its words is ignored, so the second click of a double click, or a click aimed at the text as the bar pops up, never takes a word. If the bar appears under a mouse that has not moved, move it slightly before clicking: Hyprland does not tell TypeSuggest where a still pointer is.
+A click within a moment (0.3 s) of the bar appearing or changing its words is ignored, so the second click of a double click, or a click aimed at the text as the bar pops up, never takes a word. If the bar appears under a mouse that has not moved, move it slightly before clicking: Hyprland does not tell TypeSuggest where a still pointer is, so such a click takes no word (with the bar above the caret it hides the bar instead).
 
 The key that enters navigation (`select_key`, `Up` or `Down`), the keys that commit (`accept_keys`) and the space after the word (`trailing_space`) can be changed in the configuration. A key left out of `accept_keys` ends navigation and reaches the app as usual, so with `accept_keys = space, tab` Enter always sends your message.
 
@@ -241,7 +241,7 @@ font = ""
 | `min_prefix_length` | `1` | Letters typed before suggestions appear (1 - 10). |
 | `max_candidates` | `3` | Number of suggestion pills (1 - 5). |
 | `bar_scale` | `1.0` | Bar size multiplier (0.5 - 3.0). |
-| `bar_position` | `"below"` | `"below"` or `"above"` the caret. Near the bottom of the screen the bar always goes above. With `"above"`, Hyprland gives the empty area above the bar to the input method while the bar shows, so a click there hides the bar and the text under it is clicked again; with `mouse_hides_bar = true` the bar hides as soon as the mouse moves over that area instead. Moving the mouse onto the bar never hides it. |
+| `bar_position` | `"below"` | `"below"` or `"above"` the caret. Near the bottom of the screen the bar always goes above. With `"above"`, Hyprland gives the empty area above the bar to the input method while the bar shows, so a click or scroll there only hides the bar: move the mouse a little, then click the text again. With `mouse_hides_bar = true` the bar hides as soon as the mouse moves over that area instead, so reach the bar from below or from the side. Moving the mouse onto the bar never hides it. |
 | `theme` | `"omarchy"` | `"omarchy"` takes the bar colors from the current Omarchy theme (`$XDG_STATE_HOME/omarchy/current/theme/colors.toml`) and follows theme switches automatically, falling back to the built-in palette when no Omarchy theme is found. `"default"` always uses the built-in dark teal palette. |
 | `color_background`, `color_border`, `color_pill`, `color_pill_border`, `color_text`, `color_accent`, `color_accent_text` | unset | Override single colors (bar background and border, unselected pill background, border and text, selected pill background and text) as `"#rrggbb"` or `"#rrggbbaa"`. Invalid values are ignored. |
 | `select_key` | `"up"` | Arrow key that moves into the suggestions while they show: `"up"` or `"down"`. The other arrow then moves the caret as usual. In navigation, the other arrow or `Escape` goes back to the text, and the select key again stays in the bar. |

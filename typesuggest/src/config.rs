@@ -520,8 +520,9 @@ bar_scale = 1.0
 
 # Where the bar appears (default: "below"): "below" or "above" the text caret.
 # Near the bottom of the screen the bar always goes above. With "above", the empty area above
-# the bar takes the mouse while the bar shows: a click there hides the bar (click the text
-# again), or set mouse_hides_bar below to hide it as soon as the mouse moves there.
+# the bar takes the mouse while the bar shows: a click or scroll there hides the bar (move the
+# mouse a little, then click the text again), or set mouse_hides_bar below to hide it as soon
+# as the mouse moves there.
 bar_position = "below"
 
 # Bar colors (default: "omarchy"): "omarchy" follows the current Omarchy theme and falls back to
