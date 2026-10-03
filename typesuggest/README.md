@@ -25,7 +25,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
   - Typical lookup latency: **< 0.005 ms** (5 microseconds).
   - Preserves user capitalization (e.g. `prog` -> `program`, `Prog` -> `Program`, `PROG` -> `PROGRAM`).
 - **Identifier-Aware Completion:**
-  - Completes only the segment you are typing inside `snake_case`, `kebab-case`, and `camelCase` names, leaving the rest of the identifier untouched (`myProg` -> `myProgram`, `get_prog` -> `get_program`, `HTTPServ` -> `HTTPScreen`).
+  - Completes only the segment you are typing inside `snake_case`, `kebab-case`, and `camelCase` names, leaving the rest of the identifier untouched (`myProg` -> `myProgram`, `get_prog` -> `get_program`, `HTTPServ` -> `HTTPService`).
 - **Bidirectional Retro-Editing & Cross-Word Navigation:**
   - Moving the cursor into existing words queries the dictionary for the word at the caret.
   - Committing cleanly replaces both the prefix before the cursor and the suffix after the cursor.
@@ -291,7 +291,7 @@ wayland
 The code is MIT licensed; see [LICENSE](LICENSE). The built-in data keeps its own licenses (details and changes in [`data/README.md`](data/README.md)):
 
 - **Word list:** [FrequencyWords](https://github.com/hermitdave/FrequencyWords) by Hermit Dave, from OpenSubtitles 2018 — [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)
-- **Word pairs:** built from [Tatoeba](https://tatoeba.org) English sentences — [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/)
+- **Word pairs and triples:** built from [Tatoeba](https://tatoeba.org) English sentences — [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/)
 
 The Rust libraries compiled into the binary and their licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 

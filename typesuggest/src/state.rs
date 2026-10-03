@@ -1034,6 +1034,8 @@ mod tests {
                 segment,
                 "segment of {typed:?}"
             );
+            // Up engages the bar so Tab commits the highlighted candidate
+            sm.handle_key_press(KEY_UP, None, false, &dict);
             sm.handle_key_press(KEY_TAB, None, false, &dict);
             assert_eq!(
                 sm.buffer.chars.iter().collect::<String>(),

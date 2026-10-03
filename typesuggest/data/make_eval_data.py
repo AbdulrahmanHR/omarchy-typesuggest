@@ -39,7 +39,7 @@ def write_tables(train_pairs, train_triples, outdir):
     with open(os.path.join(outdir, "bigrams.tsv"), "w") as f:
         for first in sorted(train_pairs):
             ranked = sorted(train_pairs[first].items(), key=lambda i: (-i[1], i[0]))
-            for count, second in ranked[:BI_MAX_FOLLOWERS]:
+            for second, count in ranked[:BI_MAX_FOLLOWERS]:
                 f.write(f"{first}\t{second}\t{count}\n")
 
     with open(os.path.join(outdir, "trigrams.tsv"), "w") as f:
