@@ -14,8 +14,9 @@ function positions() {
   return ["below", "above"]
 }
 
+// In the panel's order, Down first like Below in the position row
 function selectKeys() {
-  return ["up", "down"]
+  return ["down", "up"]
 }
 
 function themes() {

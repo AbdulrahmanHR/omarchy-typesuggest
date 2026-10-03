@@ -128,7 +128,7 @@ Panel {
   function landingIndex(section) {
     if (section === "look") return root.config.bar_position === "above" ? 1 : 0
     if (section === "count") return Math.max(0, Math.min(4, root.config.max_candidates - 1))
-    if (section === "select") return root.config.select_key === "down" ? 1 : 0
+    if (section === "select") return root.config.select_key === "up" ? 1 : 0
     return 0
   }
 
@@ -565,8 +565,8 @@ Panel {
             title: "SELECT KEY"
             section: "select"
             options: [
-              { value: "up", label: "Up", icon: "󰁝" },
-              { value: "down", label: "Down", icon: "󰁅" }
+              { value: "down", label: "Down", icon: "󰁅" },
+              { value: "up", label: "Up", icon: "󰁝" }
             ]
             activeValues: [root.config.select_key]
             onChosen: function(value) { typesuggest.setOption("select_key", value) }
