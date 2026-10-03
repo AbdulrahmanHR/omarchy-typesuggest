@@ -45,6 +45,9 @@ panel styled like Omarchy's own panels:
 - **Clear learned phrases**, after a confirmation.
 - **Open config file**, which opens `~/.config/typesuggest/config.toml` in your
   editor the way Omarchy opens its own config files.
+- At the bottom, in small print, the plugin's version and the installed
+  TypeSuggest's, e.g. `Plugin 1.2.0 · TypeSuggest 1.2.0`, so you can see that
+  an update took and that the two match.
 
 Changes apply the next time a text field is focused; there is no restart.
 
@@ -114,7 +117,7 @@ panel.
 | Action | Command |
 |---|---|
 | Is it installed? | `sh -c 'command -v typesuggest'` |
-| Does this build support the settings? | `typesuggest --help` |
+| Which build is it, and does it support the settings? | `typesuggest --help` (its first line names the version), each time the panel opens |
 | Is it on? | `systemctl --user is-active typesuggest` |
 | Read the settings | `typesuggest --config-json` |
 | Change a setting | `typesuggest --set <key> <value>` with `bar_position`, `bar_scale`, `max_candidates`, `select_key`, `accept_keys`, `learn`, `typo_correction` or `theme` |

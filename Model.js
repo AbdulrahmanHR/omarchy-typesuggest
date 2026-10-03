@@ -106,6 +106,31 @@ function helpSupportsSettings(helpText) {
   return text.indexOf("--config-json") !== -1 && /--set\b/.test(text)
 }
 
+// The installed build's version from the first line of `typesuggest --help`
+// ("typesuggest v1.2.0 - ..."), or "" when it does not say.
+function helpVersion(helpText) {
+  var match = /typesuggest v(\d+(?:\.\d+)*)/.exec(String(helpText || ""))
+  return match ? match[1] : ""
+}
+
+// The plugin's version from its manifest.json text, or "" when unreadable.
+function manifestVersion(text) {
+  try {
+    var data = JSON.parse(String(text || ""))
+    return data && typeof data.version === "string" ? data.version : ""
+  } catch (e) {
+    return ""
+  }
+}
+
+// "Plugin 1.2.0 · TypeSuggest 1.2.0", leaving out a version that is unknown.
+function versionLine(pluginVersion, daemonVersion) {
+  var parts = []
+  if (pluginVersion) parts.push("Plugin " + pluginVersion)
+  if (daemonVersion) parts.push("TypeSuggest " + daemonVersion)
+  return parts.join(" · ")
+}
+
 // Accept keys after toggling `key`. Refuses to remove the last one, because a
 // suggestion that no key can commit is useless.
 function toggleAcceptKey(keys, key) {

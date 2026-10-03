@@ -22,6 +22,8 @@ Item {
   // The installed build has --config-json and --set (checked via --help).
   property bool capabilityChecked: false
   property bool supportsSettings: false
+  // Version of the installed build, from the first line of --help; "" if unknown
+  property string daemonVersion: ""
   property bool running: false
 
   // Optimistic on/off so the switch moves the instant it is clicked, the way
@@ -99,25 +101,26 @@ Item {
       _desired = -1
       capabilityChecked = false
       supportsSettings = false
+      daemonVersion = ""
       configLoaded = false
       configError = ""
       _wantConfig = false
       return
     }
     if (!stateProbe.running) stateProbe.running = true
-    // Ask again on each panel open while the build looked too old, so an
-    // upgrade shows the settings without restarting the shell.
-    if (!capabilityChecked || (_wantConfig && !supportsSettings)) {
+    // Ask again on each panel open (not on the icon's periodic check), so an
+    // upgraded or downgraded build shows its version and settings without
+    // restarting the shell. --help exits before TypeSuggest loads anything,
+    // and applyCapability reads the settings once it answers.
+    if (!capabilityChecked || _wantConfig) {
       if (!helpProbe.running) helpProbe.running = true
-    } else if (_wantConfig) {
-      _wantConfig = false
-      loadConfig()
     }
   }
 
   function applyCapability(helpText) {
     capabilityChecked = true
     supportsSettings = Model.helpSupportsSettings(helpText)
+    daemonVersion = Model.helpVersion(helpText)
     if (!supportsSettings) configLoaded = false
     if (_wantConfig) {
       _wantConfig = false

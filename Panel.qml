@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -55,6 +56,18 @@ Panel {
   readonly property bool settingsReady: typesuggest.installed && typesuggest.supportsSettings && typesuggest.configLoaded
   readonly property bool outdated: typesuggest.installed && typesuggest.capabilityChecked && !typesuggest.supportsSettings
   readonly property string installScriptPath: Model.localPath(Qt.resolvedUrl("scripts/install-typesuggest.sh"))
+
+  // This plugin's version, from its own manifest.json; read again when the
+  // plugin files change (an update or a git checkout of another version)
+  property string pluginVersion: ""
+  FileView {
+    path: Model.localPath(Qt.resolvedUrl("manifest.json"))
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.pluginVersion = Model.manifestVersion(text())
+    onLoadFailed: root.pluginVersion = ""
+    onFileChanged: reload()
+  }
 
   // md-keyboard / md-keyboard-off from the bar's Nerd Font, like the
   // microphone widget's muted glyph.
@@ -663,6 +676,19 @@ Panel {
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
+          }
+
+          // Which plugin and which TypeSuggest build are running, so an update
+          // (or a mismatch between the two) can be seen at a glance
+          Text {
+            visible: text !== ""
+            width: parent.width
+            textFormat: Text.PlainText
+            text: Model.versionLine(root.pluginVersion, typesuggest.installed ? typesuggest.daemonVersion : "")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            horizontalAlignment: Text.AlignRight
           }
         }
       }
