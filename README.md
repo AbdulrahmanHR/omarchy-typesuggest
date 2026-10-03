@@ -37,8 +37,9 @@ panel styled like Omarchy's own panels:
 - An on/off switch. It starts or stops the TypeSuggest service and turns
   autostart on or off to match, so the setting survives a log out.
 - Quick settings: where the suggestion bar sits (below or above the cursor),
-  bar size (0.75x to 2x), how many suggestions to show (1 to 5), which keys
-  accept a suggestion (Enter, Space, Tab; at least one stays on), learning,
+  bar size (0.75x to 2x), how many suggestions to show (1 to 5), which arrow
+  key moves into the suggestions (Up or Down), which keys accept a suggestion
+  (Enter, Space, Tab; at least one stays on), learning,
   typo correction, and colors (follow the Omarchy theme, or TypeSuggest's
   default palette).
 - **Clear learned phrases**, after a confirmation.
@@ -59,7 +60,9 @@ If TypeSuggest is not installed, the panel explains what it is and offers an
   [`typesuggest/`](typesuggest/README.md). The quick settings need a build
   whose `typesuggest --help` lists `--config-json` and `--set` (1.0.0 and
   later); with an older build the panel still has the on/off switch, but asks
-  you to update before it shows the settings.
+  you to update before it shows the settings. The **Select key** row needs
+  TypeSuggest 1.2.0 or later and is left out for older builds; to update, run
+  `bash <plugin dir>/scripts/install-typesuggest.sh` again.
 
 ### External dependencies
 

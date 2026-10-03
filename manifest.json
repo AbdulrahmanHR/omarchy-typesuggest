@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "TypeSuggest",
-    "description": "Turn TypeSuggest on or off and change its suggestion bar: position, size, suggestions, accept keys, learning and typo correction.",
+    "description": "Turn TypeSuggest on or off and change its suggestion bar: position, size, suggestions, select and accept keys, learning and typo correction.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",

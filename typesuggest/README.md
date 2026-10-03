@@ -14,7 +14,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
   - **Press `Enter`, `Space`, or `Tab`**: Commits the chosen candidate + trailing space and **swallows the keystroke** (preventing accidental message sending in chat apps like Discord, Slack, WhatsApp, Notion, etc.). Which keys commit and whether a space follows are configurable.
 - **Unrestricted Normal Typing & Caret Freedom:**
   - Words commit directly to the application; typing is never trapped in a locked pre-edit state.
-  - Regular arrow keys and document navigation remain 100% free and unhindered.
+  - Arrow keys and document navigation stay free; only the select key (`Up` by default) is taken while suggestions are showing, so in a terminal it moves into the bar instead of recalling shell history.
 - **Contextual Trigram Language Model & Dynamic Phrase Learning:**
   - Embedded 320,000 contextual word pairs (`bigrams.tsv`) and 319,000 word triples (`trigrams.tsv`) to intelligently bias predictions based on sentence context (e.g. typing "m" after "good" suggests "morning" rather than "much", and after "as soon" it gets closer still).
   - Suggestions are scored by interpolating the three orders of word evidence — the word's own frequency, what follows the previous word, and what follows the previous two words — so a phrase can override a word that is simply more common elsewhere.
@@ -153,7 +153,7 @@ systemctl --user restart typesuggest.service
 
 ## ⌨️ Controls & Keybindings
 
-| Key | When Idle / Typing | When in Suggestions Navigation (`Up` active) |
+| Key | When Idle / Typing | When in Suggestions Navigation (after the select key) |
 |---|---|---|
 | **Letters / Numbers** | Types normally into application | Leaves navigation and types normally |
 | **`Up`** | **Enters suggestions navigation** (highlights pill 1); with `select_key = "down"` it moves the caret up instead | Stays in navigation (swallowed); with `select_key = "down"` it **cancels navigation** instead |

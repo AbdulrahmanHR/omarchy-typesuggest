@@ -792,10 +792,16 @@ impl StateMachine {
 
         match keysym {
             KEY_UP => {
-                // Up in the document: clear line buffer and pass through
+                // Up in the document: clear line buffer and pass through. With select_key =
+                // "down" the bar can be showing here, and it must not outlive the word it was for
+                let was_suggesting = self.mode != InputMode::Idle;
                 self.buffer.clear();
                 self.mode = InputMode::Idle;
-                KeyAction::PassThrough
+                if was_suggesting {
+                    KeyAction::HideSuggestions
+                } else {
+                    KeyAction::PassThrough
+                }
             }
 
             KEY_DOWN => {
@@ -1874,10 +1880,10 @@ mod tests {
         for c in "pro".chars() {
             sm.handle_key_press(c as u32, Some(c), false, &dict);
         }
-        // Up is an ordinary arrow now: it leaves the suggestions and reaches the app
+        // Up is an ordinary arrow now: it hides the suggestions and reaches the app
         assert!(!sm.may_swallow(KEY_UP, false));
         let act = sm.handle_key_press(KEY_UP, None, false, &dict);
-        assert!(!is_swallowed(&act), "{act:?}");
+        assert_eq!(act, KeyAction::HideSuggestions);
         assert_eq!(sm.mode, InputMode::Idle);
 
         for c in "pro".chars() {

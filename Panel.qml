@@ -23,6 +23,7 @@ Panel {
   //   look           Below, Above | Omarchy, Default (two groups side by side)
   //   size           bar size slider; h/l steps it
   //   count          1 to 5 suggestions
+  //   select         Up, Down (only when typesuggest reports select_key)
   //   keys           Enter, Space, Tab
   //   learn, typo    switch rows
   //   clear, config  action rows
