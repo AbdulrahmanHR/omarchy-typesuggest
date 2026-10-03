@@ -497,7 +497,8 @@ bar_scale = 1.0
 
 # Where the bar appears (default: "below"): "below" or "above" the text caret.
 # Near the bottom of the screen the bar always goes above. With "above", moving the mouse over
-# the area above the caret hides the bar so it never gets in the way of clicks.
+# the empty area above the bar hides it so it never gets in the way of clicks; the bar itself
+# can still be clicked, reaching it from below or from the side.
 bar_position = "below"
 
 # Bar colors (default: "omarchy"): "omarchy" follows the current Omarchy theme and falls back to

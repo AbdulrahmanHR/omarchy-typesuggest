@@ -569,7 +569,9 @@ Panel {
             visible: root.settingsReady
             width: parent.width
             textFormat: Text.PlainText
-            text: "Click a suggestion to take it, or press " + root.selectKeyLabel
+            // Clicking arrived with select_key, so an older typesuggest offers keys only
+            text: (root.selectKeySupported ? "Click a suggestion to take it, or press " : "While suggestions show, press ")
+              + root.selectKeyLabel
               + " to highlight one, Left/Right to choose, then an accept key. " + root.backKeyLabel
               + " or Esc goes back to the text."
             color: root.dim

@@ -60,9 +60,10 @@ If TypeSuggest is not installed, the panel explains what it is and offers an
   [`typesuggest/`](typesuggest/README.md). The quick settings need a build
   whose `typesuggest --help` lists `--config-json` and `--set` (1.0.0 and
   later); with an older build the panel still has the on/off switch, but asks
-  you to update before it shows the settings. The **Select key** row needs
-  TypeSuggest 1.2.0 or later and is left out for older builds; to update, run
-  `bash <plugin dir>/scripts/install-typesuggest.sh` again.
+  you to update before it shows the settings. Clicking a suggestion and the
+  **Select key** row need TypeSuggest 1.2.0 or later (the row is left out for
+  older builds); to update, run `bash <plugin dir>/scripts/install-typesuggest.sh`
+  again.
 
 ### External dependencies
 

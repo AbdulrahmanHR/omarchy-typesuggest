@@ -47,6 +47,16 @@ const MAX_REPLAYED_REPEATS: u64 = 4096;
 /// Linux input event code of the left mouse button, as wl_pointer reports it
 const BTN_LEFT: u32 = 0x110;
 
+/// How long after the bar appears or changes its words a click on it is ignored. The second
+/// click of a double click, or a click aimed at the text just as the bar pops up under the
+/// pointer, would otherwise take a word nobody chose.
+const CLICK_GUARD: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Whether a click at `now` comes too soon after the bar's words changed at `changed_at`
+fn click_too_soon(changed_at: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    changed_at.is_some_and(|at| now.saturating_duration_since(at) < CLICK_GUARD)
+}
+
 /// A rectangle on the popup surface, in the surface-local coordinates wl_pointer reports
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurfaceRect {
@@ -201,6 +211,8 @@ pub struct Engine {
     /// pointer leaves and whenever the popup may have moved since, so a click only counts
     /// where the pointer was seen over the bar as it is now.
     pub pointer_pos: Option<(f64, f64)>,
+    /// When the bar last appeared or changed its words (see `CLICK_GUARD`)
+    pub bar_changed_at: Option<std::time::Instant>,
     /// Key repeat the compositor tells apps to apply (keys per second, ms before repeating)
     pub repeat_rate: i32,
     pub repeat_delay: i32,
@@ -265,6 +277,7 @@ impl Engine {
             pointer: None,
             bar_areas: None,
             pointer_pos: None,
+            bar_changed_at: None,
             repeat_rate: 25,
             repeat_delay: 600,
             held_key: None,
@@ -442,6 +455,16 @@ impl Engine {
             match draw_pixmap_to_surface(surface, shm, qh, &pixmap, buffer_height) {
                 Err(e) => eprintln!("Failed to draw pixmap: {}", e),
                 Ok(bar_top) => {
+                    // Moving the highlight keeps the words where they are; anything else puts
+                    // new words under the pointer
+                    let words_changed = !self.is_popup_visible
+                        || self
+                            .last_drawn
+                            .as_ref()
+                            .is_none_or(|(drawn, _)| drawn != candidates);
+                    if words_changed {
+                        self.bar_changed_at = Some(std::time::Instant::now());
+                    }
                     self.is_popup_visible = true;
                     self.last_drawn = Some((candidates.to_vec(), selected_index));
                     let pills = self.renderer.pill_rects(candidates);
@@ -667,6 +690,9 @@ impl Engine {
             return;
         };
         if !self.active || !self.is_popup_visible || self.app_disabled || self.is_sensitive {
+            return;
+        }
+        if click_too_soon(self.bar_changed_at, std::time::Instant::now()) {
             return;
         }
         // The bar is already hidden in password fields, sudo prompts and disabled apps, but look
@@ -1316,13 +1342,13 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         }
 
                         KeyAction::CancelNavigation => {
-                            // SWALLOW Down / Escape key when exiting navigation!
+                            // SWALLOW the other arrow / Escape key when exiting navigation!
                             state.swallowed_keys.insert(key);
                             state.hide();
                         }
 
                         KeyAction::UpdateSelection { index } => {
-                            // SWALLOW key (Up / Left / Right)
+                            // SWALLOW key (the select key, Left / Right)
                             state.swallowed_keys.insert(key);
                             if let InputMode::Navigating { candidates, .. } =
                                 &state.state_machine.mode
@@ -1388,6 +1414,26 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_click_right_after_the_bar_changes_is_ignored() {
+        let now = std::time::Instant::now();
+        let ago = |ms| {
+            now.checked_sub(std::time::Duration::from_millis(ms))
+                .unwrap()
+        };
+        assert!(!click_too_soon(None, now));
+        // The second click of a double click lands within a few hundred milliseconds
+        assert!(click_too_soon(Some(ago(0)), now));
+        assert!(click_too_soon(Some(ago(250)), now));
+        assert!(!click_too_soon(Some(ago(300)), now));
+        assert!(!click_too_soon(Some(ago(2000)), now));
+        // A change stamped after the click (clocks read out of order) never blocks forever
+        assert!(click_too_soon(
+            Some(now + std::time::Duration::from_millis(5)),
+            now
+        ));
+    }
 
     #[test]
     fn test_repeats_while_held() {

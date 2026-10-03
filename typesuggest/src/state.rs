@@ -45,7 +45,7 @@ pub enum KeyAction {
     },
     /// Dismiss suggestions bar
     HideSuggestions,
-    /// Cancel navigation and swallow key (Down/Esc/Up while navigating)
+    /// Cancel navigation and swallow key (the arrow opposite the select key, or Escape)
     CancelNavigation,
     /// Update highlighted candidate index in suggestions bar
     UpdateSelection { index: usize },
