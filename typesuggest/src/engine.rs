@@ -4,10 +4,10 @@ use crate::security::{
     get_hyprland_active_window, get_hyprland_max_monitor_extent, has_sensitive_descendant,
     is_sensitive_window,
 };
-use crate::shm::{draw_pixmap_to_surface, hide_surface};
+use crate::shm::{BUFFER_SCALE, draw_pixmap_to_surface, hide_surface};
 use crate::state::{InputMode, KeyAction, StateMachine};
 use crate::theme::{OmarchyTheme, Palette, Theme};
-use crate::ui::Renderer;
+use crate::ui::{PillRect, Renderer};
 use std::os::fd::AsFd;
 use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
@@ -43,6 +43,67 @@ const MAX_BUFFER_HEIGHT: u32 = 16384;
 
 /// Upper bound on key repeats replayed for one held key
 const MAX_REPLAYED_REPEATS: u64 = 4096;
+
+/// Linux input event code of the left mouse button, as wl_pointer reports it
+const BTN_LEFT: u32 = 0x110;
+
+/// A rectangle on the popup surface, in the surface-local coordinates wl_pointer reports
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl SurfaceRect {
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+}
+
+/// Where the bar and its pills were drawn on the popup surface
+#[derive(Debug, Clone, PartialEq)]
+pub struct BarHitAreas {
+    pub bar: SurfaceRect,
+    /// One per candidate, in candidate order
+    pub pills: Vec<SurfaceRect>,
+}
+
+impl BarHitAreas {
+    /// The bar's pixmap (`width` x `height` pixels, with `pills` from `Renderer::pill_rects`)
+    /// drawn `bar_top` rows down the buffer: 0 below the caret, or near the bottom of the tall
+    /// transparent buffer above it. The buffer is attached at `BUFFER_SCALE`, so a surface
+    /// unit is that many pixels.
+    pub fn new(width: u32, height: u32, bar_top: u32, pills: &[PillRect]) -> Self {
+        let scale = f64::from(BUFFER_SCALE);
+        let top = f64::from(bar_top);
+        let to_surface = |x: f32, y: f32, w: f32, h: f32| SurfaceRect {
+            x: f64::from(x) / scale,
+            y: (top + f64::from(y)) / scale,
+            width: f64::from(w) / scale,
+            height: f64::from(h) / scale,
+        };
+        Self {
+            bar: to_surface(0.0, 0.0, width as f32, height as f32),
+            pills: pills
+                .iter()
+                .map(|p| to_surface(p.x, p.y, p.width, p.height))
+                .collect(),
+        }
+    }
+
+    /// The candidate whose pill is under the point, if any. The padding and gaps around the
+    /// pills belong to none of them.
+    pub fn pill_at(&self, x: f64, y: f64) -> Option<usize> {
+        self.pills.iter().position(|pill| pill.contains(x, y))
+    }
+
+    /// Whether the point is on the bar itself rather than the transparent rest of the popup
+    pub fn on_bar(&self, x: f64, y: f64) -> bool {
+        self.bar.contains(x, y)
+    }
+}
 
 /// A forwarded key that may still be held down, so the app may be repeating it
 #[derive(Debug, Clone, Copy)]
@@ -131,8 +192,15 @@ pub struct Engine {
     pub unavailable: bool,
     /// Logical height of the tallest monitor, for `bar_position = "above"`
     pub monitor_extent: u32,
-    /// Seat pointer, used to move the bar out of the way when it is shown above the caret
+    /// Seat pointer, used to click the pills and to move the bar out of the way when it is
+    /// shown above the caret
     pub pointer: Option<wl_pointer::WlPointer>,
+    /// Where the bar and its pills are on the popup surface, from the last draw
+    pub bar_areas: Option<BarHitAreas>,
+    /// Pointer position on the popup surface, from the last enter or motion. Cleared when the
+    /// pointer leaves and whenever the popup may have moved since, so a click only counts
+    /// where the pointer was seen over the bar as it is now.
+    pub pointer_pos: Option<(f64, f64)>,
     /// Key repeat the compositor tells apps to apply (keys per second, ms before repeating)
     pub repeat_rate: i32,
     pub repeat_delay: i32,
@@ -195,6 +263,8 @@ impl Engine {
             learned_saver: None,
             monitor_extent: FALLBACK_MONITOR_EXTENT,
             pointer: None,
+            bar_areas: None,
+            pointer_pos: None,
             repeat_rate: 25,
             repeat_delay: 600,
             held_key: None,
@@ -369,16 +439,27 @@ impl Engine {
                     .next_multiple_of(2)
                     .min(MAX_BUFFER_HEIGHT),
             };
-            if let Err(e) = draw_pixmap_to_surface(surface, shm, qh, &pixmap, buffer_height) {
-                eprintln!("Failed to draw pixmap: {}", e);
-            } else {
-                self.is_popup_visible = true;
-                self.last_drawn = Some((candidates.to_vec(), selected_index));
+            match draw_pixmap_to_surface(surface, shm, qh, &pixmap, buffer_height) {
+                Err(e) => eprintln!("Failed to draw pixmap: {}", e),
+                Ok(bar_top) => {
+                    self.is_popup_visible = true;
+                    self.last_drawn = Some((candidates.to_vec(), selected_index));
+                    let pills = self.renderer.pill_rects(candidates);
+                    let areas = BarHitAreas::new(pixmap.width(), pixmap.height(), bar_top, &pills);
+                    // A popup of another size may be placed elsewhere, and Hyprland tells a
+                    // pointer that stays still nothing about it
+                    if self.bar_areas.as_ref().map(|a| a.bar) != Some(areas.bar) {
+                        self.pointer_pos = None;
+                    }
+                    self.bar_areas = Some(areas);
+                }
             }
         }
     }
 
     pub fn hide(&mut self) {
+        // The bar may show up somewhere else next time, under a pointer that never moved
+        self.pointer_pos = None;
         if self.is_popup_visible
             && let Some(surface) = &self.popup_surface
         {
@@ -478,6 +559,142 @@ impl Engine {
         match self.state_machine.mode {
             InputMode::Idle => self.hide(),
             _ => self.redraw_current(qh),
+        }
+    }
+
+    /// Type a chosen suggestion over the word at the caret, as the state machine's
+    /// `KeyAction::CommitCandidate` describes, then learn the phrase. Accept keys and clicks on
+    /// the bar both end here; `time` stamps the Backspace and Delete keys sent to terminals.
+    fn commit_candidate(&mut self, commit: KeyAction, time: u32, conn: &Connection) {
+        let KeyAction::CommitCandidate {
+            deleted_before,
+            deleted_after,
+            replacement,
+            prev_word,
+            chosen_word,
+        } = commit
+        else {
+            return;
+        };
+
+        // Committed text is typed into the app, terminals included: never
+        // let a control character through (e.g. a newline would run a command)
+        if replacement.chars().any(char::is_control) {
+            self.hide();
+            return;
+        }
+
+        // 1. Remove the partial word. Apps that report surrounding text (GTK,
+        // Qt, Chromium) get delete_surrounding_text, applied atomically with
+        // the commit. Simulated Backspaces race the commit there: GTK and Qt
+        // queue key events but insert committed text at once, so the new word
+        // landed first and lost its tail ("hel" -> "helhe"). Only use it when
+        // the app's last reported text matches what we are about to delete.
+        let app_text_matches = self.surrounding.as_ref().is_some_and(|(text, cursor)| {
+            text.get(..*cursor)
+                .is_some_and(|before| before.ends_with(&deleted_before))
+                && text
+                    .get(*cursor..)
+                    .is_some_and(|after| after.starts_with(&deleted_after))
+        });
+        if let Some(im) = &self.im
+            && app_text_matches
+        {
+            im.delete_surrounding_text(deleted_before.len() as u32, deleted_after.len() as u32);
+        } else if let Some(vk) = &self.vk {
+            // Terminals: Backspace (evdev 14) and Delete (evdev 111)
+            for _ in deleted_before.chars() {
+                vk.key(time, 14, 1);
+                vk.key(time, 14, 0);
+            }
+            for _ in deleted_after.chars() {
+                vk.key(time, 111, 1);
+                vk.key(time, 111, 0);
+            }
+        }
+
+        // 2. Commit replacement string via InputMethod
+        if let Some(im) = &self.im {
+            im.commit_string(replacement);
+            im.commit(self.active_serial);
+        }
+
+        let _ = conn.flush();
+        self.hide();
+
+        // 3. Learn the phrase (dictionary words only) and save it in the
+        // background, after the text is on its way
+        if self.dict.is_learning_enabled()
+            && let Some(pw) = &prev_word
+        {
+            self.dict.record_user_bigram(pw, &chosen_word);
+            self.state_machine.invalidate_suggestions();
+            self.save_learned_phrases();
+        }
+    }
+
+    /// The pointer entered the popup or moved over it
+    fn pointer_moved(&mut self, x: f64, y: f64) {
+        self.pointer_pos = Some((x, y));
+        // Above the caret, the popup's transparent part covers the text above it and would take
+        // the mouse; get out of the way as soon as the mouse moves there. Over the bar itself
+        // it stays, so its pills can be clicked.
+        let on_bar =
+            self.is_popup_visible && self.bar_areas.as_ref().is_some_and(|a| a.on_bar(x, y));
+        if self.config.bar_position == BarPosition::Above && !on_bar {
+            self.state_machine.mode = InputMode::Idle;
+            self.hide();
+        }
+    }
+
+    /// Ctrl, Alt or Super is held down
+    fn shortcut_modifier_held(&self) -> bool {
+        self.xkb_state.as_ref().is_some_and(|xkb_state| {
+            [xkb::MOD_NAME_CTRL, xkb::MOD_NAME_ALT, xkb::MOD_NAME_LOGO]
+                .into_iter()
+                .any(|m| xkb_state.mod_name_is_active(m, xkb::STATE_MODS_EFFECTIVE))
+        })
+    }
+
+    /// A left click on the popup commits the suggestion under the pointer, exactly as an accept
+    /// key commits the highlighted one. Clicks beside the pills do nothing. `time` is the
+    /// button event's timestamp.
+    fn click_bar(&mut self, time: u32, conn: &Connection) {
+        let Some((x, y)) = self.pointer_pos else {
+            return;
+        };
+        let Some(index) = self.bar_areas.as_ref().and_then(|a| a.pill_at(x, y)) else {
+            return;
+        };
+        if !self.active || !self.is_popup_visible || self.app_disabled || self.is_sensitive {
+            return;
+        }
+        // The bar is already hidden in password fields, sudo prompts and disabled apps, but look
+        // again before typing anything: focus may have moved without a key being pressed
+        if self.refresh_sensitivity() || self.app_disabled || !self.is_popup_visible {
+            return;
+        }
+        // Ctrl, Alt or Super would turn the Backspaces sent to terminals into word deletions,
+        // and a key still held down keeps repeating in the app around the committed word
+        if self.shortcut_modifier_held() || self.held_key.is_some() {
+            return;
+        }
+        // Only the word drawn on the pill may be committed
+        let shown = match &self.state_machine.mode {
+            InputMode::Suggesting { candidates, .. } | InputMode::Navigating { candidates, .. } => {
+                candidates
+            }
+            InputMode::Idle => return,
+        };
+        if self
+            .last_drawn
+            .as_ref()
+            .is_none_or(|(drawn, _)| drawn != shown)
+        {
+            return;
+        }
+        if let Some(commit) = self.state_machine.commit_candidate(index) {
+            self.commit_candidate(commit, time, conn);
         }
     }
 
@@ -619,17 +836,39 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Engine {
         _: &wl_pointer::WlPointer,
         event: wl_pointer::Event,
         _: &(),
-        _: &Connection,
+        conn: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // Above the caret, the popup's transparent part covers the text above it and would take
-        // the mouse; get out of the way as soon as the mouse moves there
-        if let wl_pointer::Event::Enter { surface, .. } = event
-            && state.config.bar_position == BarPosition::Above
-            && state.popup_surface.as_ref() == Some(&surface)
-        {
-            state.state_machine.mode = InputMode::Idle;
-            state.hide();
+        match event {
+            wl_pointer::Event::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } if state.popup_surface.as_ref() == Some(&surface) => {
+                state.pointer_moved(surface_x, surface_y);
+            }
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.pointer_moved(surface_x, surface_y);
+            }
+            wl_pointer::Event::Leave { .. } => {
+                state.pointer_pos = None;
+            }
+            // Take the word on the press. Hyprland keeps the pointer on the popup while the
+            // button is held, so the release comes here too, and is ignored.
+            wl_pointer::Event::Button {
+                time,
+                button: BTN_LEFT,
+                state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+                ..
+            } => {
+                state.click_bar(time, conn);
+            }
+            _ => {}
         }
     }
 }
@@ -813,6 +1052,11 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for Engine {
             }
             zwp_input_method_v2::Event::Done => {
                 state.active_serial = state.active_serial.wrapping_add(1);
+
+                // Hyprland places the popup again at the app's caret before every done, and
+                // sends no pointer event when that slides it under a pointer that stays still.
+                // A click then needs a fresh position, or it could take the wrong pill.
+                state.pointer_pos = None;
 
                 // The update is complete: whether the field is secret first, then its text
                 if let Some(secret) = state.pending_secret.take() {
@@ -1088,74 +1332,10 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             }
                         }
 
-                        KeyAction::CommitCandidate {
-                            deleted_before,
-                            deleted_after,
-                            replacement,
-                            prev_word,
-                            chosen_word,
-                        } => {
+                        commit @ KeyAction::CommitCandidate { .. } => {
                             // SWALLOW Enter / Space / Tab key (zero accidental chat sends or extra spaces!)
                             state.swallowed_keys.insert(key);
-
-                            // Committed text is typed into the app, terminals included: never
-                            // let a control character through (e.g. a newline would run a command)
-                            if replacement.chars().any(char::is_control) {
-                                state.hide();
-                                return;
-                            }
-
-                            // 1. Remove the partial word. Apps that report surrounding text (GTK,
-                            // Qt, Chromium) get delete_surrounding_text, applied atomically with
-                            // the commit. Simulated Backspaces race the commit there: GTK and Qt
-                            // queue key events but insert committed text at once, so the new word
-                            // landed first and lost its tail ("hel" -> "helhe"). Only use it when
-                            // the app's last reported text matches what we are about to delete.
-                            let app_text_matches =
-                                state.surrounding.as_ref().is_some_and(|(text, cursor)| {
-                                    text.get(..*cursor)
-                                        .is_some_and(|before| before.ends_with(&deleted_before))
-                                        && text
-                                            .get(*cursor..)
-                                            .is_some_and(|after| after.starts_with(&deleted_after))
-                                });
-                            if let Some(im) = &state.im
-                                && app_text_matches
-                            {
-                                im.delete_surrounding_text(
-                                    deleted_before.len() as u32,
-                                    deleted_after.len() as u32,
-                                );
-                            } else if let Some(vk) = &state.vk {
-                                // Terminals: Backspace (evdev 14) and Delete (evdev 111)
-                                for _ in deleted_before.chars() {
-                                    vk.key(time, 14, 1);
-                                    vk.key(time, 14, 0);
-                                }
-                                for _ in deleted_after.chars() {
-                                    vk.key(time, 111, 1);
-                                    vk.key(time, 111, 0);
-                                }
-                            }
-
-                            // 2. Commit replacement string via InputMethod
-                            if let Some(im) = &state.im {
-                                im.commit_string(replacement);
-                                im.commit(state.active_serial);
-                            }
-
-                            let _ = conn.flush();
-                            state.hide();
-
-                            // 3. Learn the phrase (dictionary words only) and save it in the
-                            // background, after the text is on its way
-                            if state.dict.is_learning_enabled()
-                                && let Some(pw) = &prev_word
-                            {
-                                state.dict.record_user_bigram(pw, &chosen_word);
-                                state.state_machine.invalidate_suggestions();
-                                state.save_learned_phrases();
-                            }
+                            state.commit_candidate(commit, time, conn);
                         }
 
                         KeyAction::Consume => {
@@ -1221,6 +1401,104 @@ mod tests {
         assert_eq!(repeats_while_held(0, 600, 5000), 0);
         assert_eq!(repeats_while_held(-1, 600, 5000), 0);
         assert_eq!(repeats_while_held(25, -5, 5000), 0);
+    }
+
+    fn pill(x: f32, width: f32) -> PillRect {
+        PillRect {
+            x,
+            y: 9.0,
+            width,
+            height: 46.0,
+        }
+    }
+
+    #[test]
+    fn test_pill_hit_test_below_the_caret() {
+        // A 200x64 pixmap at the top of its own buffer, attached at scale 2: 100x32 on screen
+        let areas = BarHitAreas::new(200, 64, 0, &[pill(12.0, 104.0), pill(126.0, 60.0)]);
+        assert_eq!(
+            areas.bar,
+            SurfaceRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 32.0
+            }
+        );
+        assert_eq!(
+            areas.pills[0],
+            SurfaceRect {
+                x: 6.0,
+                y: 4.5,
+                width: 52.0,
+                height: 23.0
+            }
+        );
+
+        assert_eq!(areas.pill_at(6.0, 4.5), Some(0));
+        assert_eq!(areas.pill_at(30.0, 16.0), Some(0));
+        assert_eq!(areas.pill_at(57.9, 27.4), Some(0));
+        assert_eq!(areas.pill_at(63.0, 16.0), Some(1));
+        assert_eq!(areas.pill_at(92.9, 16.0), Some(1));
+
+        // The gap between the pills (58 to 63) and the padding around them take no click
+        for (x, y) in [
+            (58.0, 16.0),
+            (60.5, 16.0),
+            (62.9, 16.0),
+            (3.0, 16.0),
+            (30.0, 2.0),
+            (30.0, 27.5),
+            (95.0, 16.0),
+        ] {
+            assert_eq!(areas.pill_at(x, y), None, "({x}, {y})");
+            assert!(areas.on_bar(x, y), "({x}, {y})");
+        }
+        assert!(!areas.on_bar(30.0, 32.0));
+        assert!(!areas.on_bar(100.0, 16.0));
+    }
+
+    #[test]
+    fn test_pill_hit_test_above_the_caret() {
+        // Above the caret the bar is drawn at the bottom of a buffer taller than the monitor,
+        // here 2 * 1440 + 64 px, so it starts 1440 units down the surface
+        let bar_top = 2 * 1440;
+        let areas = BarHitAreas::new(200, 64, bar_top, &[pill(12.0, 104.0), pill(126.0, 60.0)]);
+        let top = 1440.0;
+        assert_eq!(areas.bar.y, top);
+        assert_eq!(areas.pills[1].y, top + 4.5);
+
+        // Where the pills would be without the offset is transparent popup, not bar
+        assert_eq!(areas.pill_at(30.0, 16.0), None);
+        assert!(!areas.on_bar(30.0, 16.0));
+        assert!(!areas.on_bar(30.0, top - 0.5));
+
+        assert_eq!(areas.pill_at(30.0, top + 16.0), Some(0));
+        assert_eq!(areas.pill_at(80.0, top + 16.0), Some(1));
+        assert_eq!(areas.pill_at(60.5, top + 16.0), None);
+        assert!(areas.on_bar(60.5, top + 16.0));
+        assert_eq!(areas.pill_at(30.0, top + 2.0), None);
+    }
+
+    #[test]
+    fn test_drawn_pill_centers_hit_their_own_candidate() {
+        let renderer = Renderer::new().expect("Failed to initialize renderer");
+        let candidates = vec![
+            "I".to_string(),
+            "program".to_string(),
+            "progressively".to_string(),
+        ];
+        let pixmap = renderer.render_bar(&candidates, None).unwrap();
+        let pills = renderer.pill_rects(&candidates);
+        for bar_top in [0, 2 * 2160] {
+            let areas = BarHitAreas::new(pixmap.width(), pixmap.height(), bar_top, &pills);
+            assert_eq!(areas.pills.len(), candidates.len());
+            for (i, p) in pills.iter().enumerate() {
+                let x = f64::from(p.x + p.width / 2.0) / 2.0;
+                let y = (f64::from(bar_top) + f64::from(p.y + p.height / 2.0)) / 2.0;
+                assert_eq!(areas.pill_at(x, y), Some(i), "pill {i}, bar at {bar_top}");
+            }
+        }
     }
 
     #[test]

@@ -11,6 +11,29 @@ pub struct Renderer {
     pub palette: Palette,
 }
 
+/// Where a candidate's pill sits on the bar, in pixmap pixels
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PillRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Sizes of the bar for a set of candidates. Drawing and hit-testing both take the pills from
+/// here, so a click lands on the pill that was drawn under it.
+struct BarLayout {
+    /// Pixels per point: 2x HiDPI times the user's bar size
+    scale: f32,
+    font_size: f32,
+    /// Pixmap size, rounded up to even numbers
+    width: u32,
+    height: u32,
+    /// Height of the drawn bar before rounding
+    bar_height: f32,
+    pills: Vec<PillRect>,
+}
+
 impl Renderer {
     pub fn new() -> Result<Self, String> {
         Self::with_font("")
@@ -42,14 +65,8 @@ impl Renderer {
         width
     }
 
-    /// Render 3 suggestion pills into an ARGB32 pixmap at 2x HiDPI resolution
-    /// candidates: slice of candidate strings
-    /// selected_index: Some(index) if in Navigating mode, None if in Suggesting mode
-    pub fn render_bar(
-        &self,
-        candidates: &[String],
-        selected_index: Option<usize>,
-    ) -> Option<Pixmap> {
+    /// Lay out the bar for these candidates: its size and where each pill goes
+    fn layout(&self, candidates: &[String]) -> Option<BarLayout> {
         if candidates.is_empty() {
             return None;
         }
@@ -79,8 +96,53 @@ impl Renderer {
         // The buffer is attached at scale 2, so both sides must be even: compositors may reject
         // a buffer whose size is not a multiple of its scale (wlroots does)
         let even = |v: f32| (v.ceil() as u32).next_multiple_of(2);
-        let bar_width = even(bar_width_f);
-        let bar_height_u32 = even(bar_height);
+
+        // Pills sit left to right inside the bar's padding
+        let mut pills = Vec::with_capacity(pill_widths.len());
+        let mut cur_x = bar_padding_h;
+        for pill_w in pill_widths {
+            pills.push(PillRect {
+                x: cur_x,
+                y: bar_padding_v,
+                width: pill_w,
+                height: pill_height,
+            });
+            cur_x += pill_w + pill_spacing;
+        }
+
+        Some(BarLayout {
+            scale,
+            font_size,
+            width: even(bar_width_f),
+            height: even(bar_height),
+            bar_height,
+            pills,
+        })
+    }
+
+    /// Where `render_bar` draws each candidate's pill, in pixmap pixels and candidate order
+    pub fn pill_rects(&self, candidates: &[String]) -> Vec<PillRect> {
+        self.layout(candidates)
+            .map(|layout| layout.pills)
+            .unwrap_or_default()
+    }
+
+    /// Render 3 suggestion pills into an ARGB32 pixmap at 2x HiDPI resolution
+    /// candidates: slice of candidate strings
+    /// selected_index: Some(index) if in Navigating mode, None if in Suggesting mode
+    pub fn render_bar(
+        &self,
+        candidates: &[String],
+        selected_index: Option<usize>,
+    ) -> Option<Pixmap> {
+        let BarLayout {
+            scale,
+            font_size,
+            width: bar_width,
+            height: bar_height_u32,
+            bar_height,
+            pills,
+        } = self.layout(candidates)?;
 
         let mut pixmap = Pixmap::new(bar_width, bar_height_u32)?;
 
@@ -110,12 +172,10 @@ impl Renderer {
         }
 
         // 2. Draw each candidate pill
-        let mut cur_x = bar_padding_h;
-        for (i, word) in candidates.iter().enumerate() {
-            let pill_w = pill_widths[i];
+        for (i, (word, pill)) in candidates.iter().zip(&pills).enumerate() {
             let is_selected = selected_index == Some(i);
 
-            let pill_rect = Rect::from_xywh(cur_x, bar_padding_v, pill_w, pill_height)?;
+            let pill_rect = Rect::from_xywh(pill.x, pill.y, pill.width, pill.height)?;
             let pill_path = rounded_rect_path(pill_rect, 4.5 * scale);
 
             let mut pill_paint = Paint::default();
@@ -154,16 +214,13 @@ impl Renderer {
                 palette.text
             };
             let text_w = self.measure_text(word, font_size);
-            let text_x = cur_x + ((pill_w - text_w) / 2.0);
+            let text_x = pill.x + ((pill.width - text_w) / 2.0);
 
             // Optical vertical centering using 'H' cap-height
             let h_metrics = self.font.metrics('H', font_size);
-            let text_y =
-                bar_padding_v + (pill_height + h_metrics.height as f32) / 2.0 - (1.0 * scale);
+            let text_y = pill.y + (pill.height + h_metrics.height as f32) / 2.0 - (1.0 * scale);
 
             self.draw_text(&mut pixmap, word, text_x, text_y, font_size, text_color);
-
-            cur_x += pill_w + pill_spacing;
         }
 
         Some(pixmap)
@@ -390,6 +447,80 @@ mod tests {
             (pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()),
             (255, 0, 0, 255)
         );
+    }
+
+    /// Clicks are hit-tested against pill_rects, so it must say exactly where render_bar
+    /// paints each pill
+    #[test]
+    fn test_pill_rects_match_the_drawn_pills() {
+        let mut renderer = Renderer::new().expect("Failed to initialize renderer");
+        // Distinct opaque colors, so a pixel tells which part of the bar it is on
+        renderer.palette.background = Rgba::new(10, 20, 30, 255);
+        renderer.palette.pill = Rgba::new(200, 0, 0, 255);
+        renderer.palette.accent = Rgba::new(0, 200, 0, 255);
+        let background = (10, 20, 30);
+        // A short word gets the minimum pill width, a long one a wider pill
+        let candidates = vec![
+            "a".to_string(),
+            "program".to_string(),
+            "progressively".to_string(),
+        ];
+
+        for scale in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.7] {
+            renderer.bar_scale = scale;
+            let pixmap = renderer.render_bar(&candidates, Some(1)).unwrap();
+            let pills = renderer.pill_rects(&candidates);
+            assert_eq!(pills.len(), candidates.len(), "at {scale}");
+
+            let color = |x: f32, y: f32| {
+                let p = pixmap.pixel(x as u32, y as u32).unwrap();
+                (p.red(), p.green(), p.blue())
+            };
+            // Points per pixel, as render_bar counts them
+            let s = 2.0 * scale;
+            for (i, pill) in pills.iter().enumerate() {
+                assert!(pill.x >= 0.0 && pill.y >= 0.0, "pill {i} at {scale}");
+                assert!(
+                    pill.x + pill.width <= pixmap.width() as f32
+                        && pill.y + pill.height <= pixmap.height() as f32,
+                    "pill {i} leaves the {}x{} bar at {scale}",
+                    pixmap.width(),
+                    pixmap.height()
+                );
+
+                // The pill's fill shows inside both ends, clear of its border and its text
+                let fill = if i == 1 { (0, 200, 0) } else { (200, 0, 0) };
+                let mid_y = pill.y + pill.height / 2.0;
+                assert_eq!(color(pill.x + 6.0 * s, mid_y), fill, "pill {i} at {scale}");
+                assert_eq!(
+                    color(pill.x + pill.width - 6.0 * s, mid_y),
+                    fill,
+                    "pill {i} at {scale}"
+                );
+                // Just above and below it is the bar
+                assert_eq!(color(pill.x + 6.0 * s, pill.y - 2.0 * s), background);
+                assert_eq!(
+                    color(pill.x + 6.0 * s, pill.y + pill.height + 2.0 * s),
+                    background
+                );
+
+                // Left to right, with bar between them
+                let gap_end = pills
+                    .get(i + 1)
+                    .map_or(pill.x + pill.width + 5.0 * s, |n| n.x);
+                assert!(pill.x + pill.width < gap_end, "pills {i} and next overlap");
+                assert_eq!(
+                    color((pill.x + pill.width + gap_end) / 2.0, mid_y),
+                    background,
+                    "after pill {i} at {scale}"
+                );
+            }
+            assert_eq!(
+                color(pills[0].x - 2.5 * s, pills[0].y + pills[0].height / 2.0),
+                background
+            );
+        }
+        assert!(renderer.pill_rects(&[]).is_empty());
     }
 
     #[test]

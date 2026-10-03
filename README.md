@@ -82,12 +82,13 @@ programs, all of which Omarchy already ships except TypeSuggest itself:
 
 While suggestions are showing, press <kbd>Up</kbd> to highlight the first one,
 <kbd>Left</kbd>/<kbd>Right</kbd> to move between them, and <kbd>Enter</kbd>,
-<kbd>Space</kbd> or <kbd>Tab</kbd> to accept. <kbd>Down</kbd> or
-<kbd>Esc</kbd> backs out. If <kbd>Down</kbd> feels more natural (the bar sits
-below the caret by default), pick it under **Select key** in the panel; then
-<kbd>Down</kbd> opens the bar and <kbd>Up</kbd> or <kbd>Esc</kbd> backs out.
-Both key rows can be changed there; every key is listed under **Controls &
-Keybindings** in [`typesuggest/README.md`](typesuggest/README.md).
+<kbd>Space</kbd> or <kbd>Tab</kbd> to accept, or click the one you want.
+<kbd>Down</kbd> or <kbd>Esc</kbd> backs out. If <kbd>Down</kbd> feels more
+natural (the bar sits below the caret by default), pick it under **Select
+key** in the panel; then <kbd>Down</kbd> opens the bar and <kbd>Up</kbd> or
+<kbd>Esc</kbd> backs out. Both key rows can be changed there; every key is
+listed under **Controls & Keybindings** in
+[`typesuggest/README.md`](typesuggest/README.md).
 
 - **Left click** the icon: open the panel.
 - **Right click** the icon: turn TypeSuggest on or off.

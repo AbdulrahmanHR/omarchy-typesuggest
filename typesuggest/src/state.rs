@@ -714,31 +714,13 @@ impl StateMachine {
                 _ if is_accept_key => {
                     // Commit selected candidate: accept keys (Enter, Space, Tab by default) commit
                     // and are swallowed!
-                    let chosen = candidates[current_idx].clone();
-                    let (prefix, context) = self.buffer.current_word_context();
-                    let prev_word = context.prev.clone();
-                    let suffix = self.buffer.current_word_suffix();
-                    // A segment completed in the middle of an identifier ("getUs|erName")
-                    // must not split it with a space
-                    let replacement =
-                        if self.trailing_space && !self.buffer.word_continues_after_suffix() {
-                            format!("{} ", chosen)
-                        } else {
-                            chosen.clone()
-                        };
-                    self.buffer.apply_replacement(
-                        prefix.chars().count(),
-                        suffix.chars().count(),
-                        &replacement,
-                    );
+                    if let Some(commit) = self.commit_candidate(current_idx) {
+                        return commit;
+                    }
+                    // A highlight past the last candidate has nothing to commit; the key is
+                    // still swallowed, as an accept key always is while navigating
                     self.mode = InputMode::Idle;
-                    return KeyAction::CommitCandidate {
-                        deleted_before: prefix,
-                        deleted_after: suffix,
-                        replacement,
-                        prev_word,
-                        chosen_word: chosen,
-                    };
+                    return KeyAction::CancelNavigation;
                 }
 
                 _ => {
@@ -769,6 +751,40 @@ impl StateMachine {
         }
 
         self.handle_typing_key(keysym, ch, dict)
+    }
+
+    /// Commit candidate `index` of the suggestions on the bar, highlighted or not, the way an
+    /// accept key commits the highlighted one: only the word or identifier segment at the
+    /// caret is replaced, with a trailing space unless the identifier goes on after it. A
+    /// click on a pill ends up here too. Returns None, and changes nothing, when no
+    /// suggestions are shown or `index` is past the last one.
+    pub fn commit_candidate(&mut self, index: usize) -> Option<KeyAction> {
+        let chosen = match &self.mode {
+            InputMode::Suggesting { candidates, .. } | InputMode::Navigating { candidates, .. } => {
+                candidates.get(index)?.clone()
+            }
+            InputMode::Idle => return None,
+        };
+        let (prefix, context) = self.buffer.current_word_context();
+        let prev_word = context.prev.clone();
+        let suffix = self.buffer.current_word_suffix();
+        // A segment completed in the middle of an identifier ("getUs|erName")
+        // must not split it with a space
+        let replacement = if self.trailing_space && !self.buffer.word_continues_after_suffix() {
+            format!("{} ", chosen)
+        } else {
+            chosen.clone()
+        };
+        self.buffer
+            .apply_replacement(prefix.chars().count(), suffix.chars().count(), &replacement);
+        self.mode = InputMode::Idle;
+        Some(KeyAction::CommitCandidate {
+            deleted_before: prefix,
+            deleted_after: suffix,
+            replacement,
+            prev_word,
+            chosen_word: chosen,
+        })
     }
 
     /// 3. Normal typing & navigation keys (anything not handled as a shortcut or navigation key)
@@ -1396,6 +1412,147 @@ mod tests {
             }
         );
         assert_eq!(sm.buffer.chars.iter().collect::<String>(), "program");
+    }
+
+    /// Up, then Right `index` times, then Enter: the keyboard way to commit candidate `index`
+    fn commit_with_keys(sm: &mut StateMachine, dict: &Dictionary, index: usize) -> KeyAction {
+        sm.handle_key_press(KEY_UP, None, false, dict);
+        for _ in 0..index {
+            sm.handle_key_press(KEY_RIGHT, None, false, dict);
+        }
+        sm.handle_key_press(KEY_RETURN, None, false, dict)
+    }
+
+    #[test]
+    fn test_commit_candidate_while_suggesting_matches_the_accept_keys() {
+        let dict = setup_dict();
+        // A click needs no Up first: any pill of the bar can be taken straight away
+        for (index, word) in ["program", "project", "progress"].into_iter().enumerate() {
+            let mut clicked = StateMachine::new(3);
+            let mut keyed = StateMachine::new(3);
+            for c in "echo pro".chars() {
+                clicked.handle_key_press(c as u32, Some(c), false, &dict);
+                keyed.handle_key_press(c as u32, Some(c), false, &dict);
+            }
+            assert!(matches!(clicked.mode, InputMode::Suggesting { .. }));
+
+            let act = clicked.commit_candidate(index);
+            assert_eq!(
+                act,
+                Some(KeyAction::CommitCandidate {
+                    deleted_before: "pro".to_string(),
+                    deleted_after: String::new(),
+                    replacement: format!("{word} "),
+                    prev_word: Some("echo".to_string()),
+                    chosen_word: word.to_string(),
+                })
+            );
+            assert_eq!(clicked.mode, InputMode::Idle);
+            assert_eq!(
+                clicked.buffer.chars.iter().collect::<String>(),
+                format!("echo {word} ")
+            );
+
+            assert_eq!(act, Some(commit_with_keys(&mut keyed, &dict, index)));
+            assert_eq!(clicked.buffer, keyed.buffer);
+        }
+    }
+
+    #[test]
+    fn test_commit_candidate_while_navigating_ignores_the_highlight() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        type_and_navigate(&mut sm, &dict, "pro");
+
+        // "program" is highlighted, and the click takes "progress"
+        let act = sm.commit_candidate(2);
+        assert_eq!(
+            act,
+            Some(KeyAction::CommitCandidate {
+                deleted_before: "pro".to_string(),
+                deleted_after: String::new(),
+                replacement: "progress ".to_string(),
+                prev_word: None,
+                chosen_word: "progress".to_string(),
+            })
+        );
+        assert_eq!(sm.mode, InputMode::Idle);
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "progress ");
+    }
+
+    #[test]
+    fn test_commit_candidate_replaces_only_the_identifier_segment() {
+        let dict = setup_dict();
+        // At the end of an identifier: only the segment is replaced, and a space follows
+        let mut sm = StateMachine::new(2);
+        for c in "myProg".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        let act = sm.commit_candidate(0);
+        assert!(
+            matches!(&act, Some(KeyAction::CommitCandidate { deleted_before, deleted_after, replacement, prev_word: None, .. })
+                if deleted_before == "Prog" && deleted_after.is_empty() && replacement == "Program "),
+            "{act:?}"
+        );
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "myProgram ");
+
+        // In the middle of one ("getPro|gName"): the rest of the segment goes, no space is
+        // added, and the segments after it stay
+        let mut clicked = StateMachine::new(2);
+        let mut keyed = StateMachine::new(2);
+        for sm in [&mut clicked, &mut keyed] {
+            for c in "getProgName".chars() {
+                sm.handle_key_press(c as u32, Some(c), false, &dict);
+            }
+            for _ in 0.."gName".len() {
+                sm.handle_key_press(KEY_LEFT, None, false, &dict);
+            }
+            sm.handle_key_press(KEY_BACKSPACE, None, false, &dict);
+            sm.handle_key_press('o' as u32, Some('o'), false, &dict);
+        }
+        let act = clicked.commit_candidate(0);
+        assert!(
+            matches!(&act, Some(KeyAction::CommitCandidate { deleted_before, deleted_after, replacement, .. })
+                if deleted_before == "Pro" && deleted_after == "g" && replacement == "Program"),
+            "{act:?}"
+        );
+        assert_eq!(
+            clicked.buffer.chars.iter().collect::<String>(),
+            "getProgramName"
+        );
+        assert_eq!(act, Some(commit_with_keys(&mut keyed, &dict, 0)));
+    }
+
+    #[test]
+    fn test_commit_candidate_out_of_range_or_idle_does_nothing() {
+        let dict = setup_dict();
+
+        // Nothing on the bar
+        let mut sm = StateMachine::new(3);
+        assert_eq!(sm.commit_candidate(0), None);
+        for c in "pro ".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        assert_eq!(sm.mode, InputMode::Idle);
+        assert_eq!(sm.commit_candidate(0), None);
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "pro ");
+
+        // Past the last of three suggestions, while suggesting and while navigating
+        let mut sm = StateMachine::new(3);
+        for c in "pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        let before = sm.mode.clone();
+        assert_eq!(sm.commit_candidate(3), None);
+        assert_eq!(sm.commit_candidate(usize::MAX), None);
+        assert_eq!(sm.mode, before);
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "pro");
+
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        let before = sm.mode.clone();
+        assert_eq!(sm.commit_candidate(3), None);
+        assert_eq!(sm.mode, before);
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "pro");
     }
 
     #[test]

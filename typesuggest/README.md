@@ -12,6 +12,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
   - **Press `Left` / `Right`**: Cycles between the suggestion pills.
   - **Press `Down` or `Escape`** (`Up` or `Escape`, with `select_key = "down"`): Cancels suggestion navigation and returns focus directly to the document caret (swallowing the key). Pressing the key that entered navigation again keeps you in the bar.
   - **Press `Enter`, `Space`, or `Tab`**: Commits the chosen candidate + trailing space and **swallows the keystroke** (preventing accidental message sending in chat apps like Discord, Slack, WhatsApp, Notion, etc.). Which keys commit and whether a space follows are configurable.
+  - **Click a suggestion** (left mouse button): Commits that word the same way, without highlighting it first.
 - **Unrestricted Normal Typing & Caret Freedom:**
   - Words commit directly to the application; typing is never trapped in a locked pre-edit state.
   - Arrow keys and document navigation stay free; only the select key (`Up` by default) is taken while suggestions are showing, so in a terminal it moves into the bar instead of recalling shell history.
@@ -163,6 +164,7 @@ systemctl --user restart typesuggest.service
 | **`Enter` / `Return`** | Inserts newline / submits in app | **Commits candidate + space** (swallowed, zero accidental chat sends) |
 | **`Space`** | Inserts space in document | **Commits candidate + space** (swallowed) |
 | **`Tab`** | Indents / tabs in app | **Commits candidate + space** (swallowed) |
+| **Left click** on a suggestion | **Commits that suggestion + space** while the bar shows | **Commits that suggestion + space**, whichever pill is highlighted |
 
 The key that enters navigation (`select_key`, `Up` or `Down`), the keys that commit (`accept_keys`) and the space after the word (`trailing_space`) can be changed in the configuration. A key left out of `accept_keys` ends navigation and reaches the app as usual, so with `accept_keys = space, tab` Enter always sends your message.
 
@@ -228,7 +230,7 @@ font = ""
 | `min_prefix_length` | `1` | Letters typed before suggestions appear (1 - 10). |
 | `max_candidates` | `3` | Number of suggestion pills (1 - 5). |
 | `bar_scale` | `1.0` | Bar size multiplier (0.5 - 3.0). |
-| `bar_position` | `"below"` | `"below"` or `"above"` the caret. Near the bottom of the screen the bar always goes above. With `"above"`, moving the mouse over the area above the caret hides the bar so it never blocks clicks (Hyprland gives that area to the input method while the bar is shown). |
+| `bar_position` | `"below"` | `"below"` or `"above"` the caret. Near the bottom of the screen the bar always goes above. With `"above"`, moving the mouse over the empty area above the bar hides the bar so it never blocks clicks (Hyprland gives that area to the input method while the bar is shown); the bar itself can still be clicked. |
 | `theme` | `"omarchy"` | `"omarchy"` takes the bar colors from the current Omarchy theme (`$XDG_STATE_HOME/omarchy/current/theme/colors.toml`) and follows theme switches automatically, falling back to the built-in palette when no Omarchy theme is found. `"default"` always uses the built-in dark teal palette. |
 | `color_background`, `color_border`, `color_pill`, `color_pill_border`, `color_text`, `color_accent`, `color_accent_text` | unset | Override single colors (bar background and border, unselected pill background, border and text, selected pill background and text) as `"#rrggbb"` or `"#rrggbbaa"`. Invalid values are ignored. |
 | `select_key` | `"up"` | Arrow key that moves into the suggestions while they show: `"up"` or `"down"`. The other arrow then moves the caret as usual. In navigation, the other arrow or `Escape` goes back to the text, and the select key again stays in the bar. |

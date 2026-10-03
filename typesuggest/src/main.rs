@@ -268,6 +268,7 @@ fn print_help() {
         "    - Press an accept key (Enter, Space, or Tab by default) to commit the selected word"
     );
     println!("      (swallowing the key); any other key leaves navigation and reaches the app");
+    println!("    - Or click a suggestion with the left mouse button to commit it straight away");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

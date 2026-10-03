@@ -6,15 +6,19 @@ use tiny_skia::Pixmap;
 use wayland_client::protocol::{wl_buffer, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Dispatch, QueueHandle};
 
+/// Buffer pixels per surface unit: the bar is rendered at 2x for HiDPI screens
+pub const BUFFER_SCALE: i32 = 2;
+
 /// Create a WlBuffer from a tiny-skia Pixmap and attach it to a surface. With `buffer_height`
 /// taller than the pixmap, the pixmap is placed at the bottom and the rest stays transparent.
+/// Returns the buffer row the pixmap's top edge was drawn at.
 pub fn draw_pixmap_to_surface<T>(
     surface: &wl_surface::WlSurface,
     shm: &wl_shm::WlShm,
     qh: &QueueHandle<T>,
     pixmap: &Pixmap,
     buffer_height: u32,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<u32, Box<dyn std::error::Error>>
 where
     T: 'static + Dispatch<wl_shm_pool::WlShmPool, ()> + Dispatch<wl_buffer::WlBuffer, ()>,
 {
@@ -54,7 +58,7 @@ where
     let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
     let buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
 
-    surface.set_buffer_scale(2);
+    surface.set_buffer_scale(BUFFER_SCALE);
     surface.attach(Some(&buffer), 0, 0);
     surface.damage_buffer(0, bar_top, width, bar_height);
     surface.commit();
@@ -62,7 +66,7 @@ where
     // Pool can be destroyed once buffer is created
     pool.destroy();
 
-    Ok(())
+    Ok(bar_top as u32)
 }
 
 /// Hide the surface by attaching None and committing

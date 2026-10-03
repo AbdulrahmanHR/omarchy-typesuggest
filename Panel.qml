@@ -563,12 +563,13 @@ Panel {
             onChosen: function(value) { typesuggest.toggleAcceptKey(value) }
           }
 
-          // How the two key rows fit together, since nothing on the bar itself says so
+          // How to take a suggestion and how the two key rows fit together, since nothing on
+          // the bar itself says so
           Text {
             visible: root.settingsReady
             width: parent.width
             textFormat: Text.PlainText
-            text: "While suggestions show, press " + root.selectKeyLabel
+            text: "Click a suggestion to take it, or press " + root.selectKeyLabel
               + " to highlight one, Left/Right to choose, then an accept key. " + root.backKeyLabel
               + " or Esc goes back to the text."
             color: root.dim
