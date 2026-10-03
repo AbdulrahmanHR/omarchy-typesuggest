@@ -699,8 +699,14 @@ impl StateMachine {
                     return KeyAction::UpdateSelection { index: prev_idx };
                 }
 
+                // The select key already brought the caret into the bar, so pressing it again
+                // (or holding it) stays there; the opposite arrow points back at the text
+                _ if keysym == self.select_keysym() => {
+                    return KeyAction::Consume;
+                }
+
                 KEY_UP | KEY_DOWN | KEY_ESCAPE => {
-                    // Up, Down, or Escape cancels navigation back to document and swallows key
+                    // The other arrow or Escape cancels navigation back to document and swallows key
                     self.mode = InputMode::Idle;
                     return KeyAction::CancelNavigation;
                 }
@@ -1441,20 +1447,27 @@ mod tests {
     }
 
     #[test]
-    fn test_windows_up_toggle_cancels_navigation() {
+    fn test_select_key_again_stays_in_the_bar() {
         let dict = setup_dict();
         let mut sm = StateMachine::new(3);
 
         sm.handle_key_press(0x0070, Some('p'), false, &dict);
         sm.handle_key_press(0x0072, Some('r'), false, &dict);
 
-        // Enter navigation with Up
-        sm.handle_key_press(0xff52, None, false, &dict);
+        // Enter navigation with Up and move to the second pill
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        sm.handle_key_press(KEY_RIGHT, None, false, &dict);
 
-        // Press Up again: cancels navigation and swallows key
-        let act = sm.handle_key_press(0xff52, None, false, &dict);
-        assert_eq!(act, KeyAction::CancelNavigation);
-        assert_eq!(sm.mode, InputMode::Idle);
+        // Up again (or held) is swallowed and keeps the highlight where it is
+        let act = sm.handle_key_press(KEY_UP, None, false, &dict);
+        assert_eq!(act, KeyAction::Consume);
+        assert!(matches!(
+            sm.mode,
+            InputMode::Navigating {
+                selected_index: 1,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1876,16 +1889,24 @@ mod tests {
         sm.handle_key_press(KEY_TAB, None, false, &dict);
         assert_eq!(sm.buffer.chars.iter().collect::<String>(), "program ");
 
-        // Either arrow still backs out of the bar
-        for back in [KEY_UP, KEY_DOWN] {
-            for c in " pro".chars() {
-                sm.handle_key_press(c as u32, Some(c), false, &dict);
-            }
-            sm.handle_key_press(KEY_DOWN, None, false, &dict);
+        // In the bar, Down again stays there, while Up (the way back to the text) and Escape
+        // leave it
+        for c in " pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        sm.handle_key_press(KEY_DOWN, None, false, &dict);
+        assert_eq!(
+            sm.handle_key_press(KEY_DOWN, None, false, &dict),
+            KeyAction::Consume
+        );
+        for back in [KEY_UP, KEY_ESCAPE] {
             assert_eq!(
                 sm.handle_key_press(back, None, false, &dict),
                 KeyAction::CancelNavigation
             );
+            assert_eq!(sm.mode, InputMode::Idle);
+            sm.handle_key_press('o' as u32, Some('o'), false, &dict);
+            sm.handle_key_press(KEY_DOWN, None, false, &dict);
         }
     }
 

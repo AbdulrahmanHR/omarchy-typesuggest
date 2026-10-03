@@ -261,7 +261,9 @@ fn print_help() {
     );
     println!("    - Press Up arrow (or Down, with select_key = down) to navigate into suggestions");
     println!("    - Press Left / Right arrow to cycle between suggestions");
-    println!("    - Press Up arrow, Down arrow, or Escape to cancel navigation");
+    println!(
+        "    - Press the other arrow (Down, or Up with select_key = down) or Escape to cancel"
+    );
     println!(
         "    - Press an accept key (Enter, Space, or Tab by default) to commit the selected word"
     );

@@ -78,6 +78,7 @@ Panel {
   // Older typesuggest builds report no select_key and always use Up
   readonly property bool selectKeySupported: root.config.select_key === "up" || root.config.select_key === "down"
   readonly property string selectKeyLabel: root.config.select_key === "down" ? "Down" : "Up"
+  readonly property string backKeyLabel: root.config.select_key === "down" ? "Up" : "Down"
 
   readonly property var sections: {
     if (!typesuggest.probed) return []
@@ -567,7 +568,8 @@ Panel {
             width: parent.width
             textFormat: Text.PlainText
             text: "While suggestions show, press " + root.selectKeyLabel
-              + " to highlight one, Left/Right to choose, then an accept key. Up, Down or Esc goes back to the text."
+              + " to highlight one, Left/Right to choose, then an accept key. " + root.backKeyLabel
+              + " or Esc goes back to the text."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

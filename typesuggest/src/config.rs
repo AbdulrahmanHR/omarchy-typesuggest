@@ -514,7 +514,7 @@ color_accent = ""
 color_accent_text = ""
 
 # Arrow key that moves into the suggestion bar while it is showing (default: "up"): "up" or
-# "down". Left/Right then move between suggestions; Up, Down or Escape go back to the text.
+# "down". Left/Right then move between suggestions; the other arrow or Escape goes back to the text.
 select_key = "up"
 
 # Keys that commit the highlighted suggestion after pressing the select key
