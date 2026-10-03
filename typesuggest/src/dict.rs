@@ -105,31 +105,26 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
 }
 
 /// Spell `word` the way `typed` was spelled, so a suggestion fits the casing already on
-/// screen: "prog" gives "program", "Prog" gives "Program", "PROG" gives "PROGRAM" and
-/// "proG" gives "proGram". Whatever the user has not typed yet stays as the dictionary has
-/// it, which is lower case.
+/// screen: "prog" gives "program", "Prog" gives "Program" and "PROG" gives "PROGRAM".
+/// Capitals inside the prefix are not copied letter by letter, so a held Shift ("THe")
+/// or a typo correction is offered as a word ("They", not "THey"); identifiers get their
+/// inner capitals from completing one segment at a time instead.
 fn match_case(typed: &str, word: &str) -> String {
     // An all-capitals prefix means the whole word is an acronym or a constant
-    if typed.len() > 1 && typed.chars().all(|c| c.is_uppercase()) {
+    if typed.chars().nth(1).is_some() && typed.chars().all(|c| c.is_uppercase()) {
         return word.to_uppercase();
     }
-    // "I" and its contractions are the pronoun however they were typed
-    if word == "i" || word.starts_with("i'") {
+    // A leading capital starts a sentence or a name; "I" and its contractions are the
+    // pronoun however they were typed
+    let capitalized = typed.chars().next().is_some_and(|c| c.is_uppercase());
+    if capitalized || word == "i" || word.starts_with("i'") {
         let mut chars = word.chars();
         return match chars.next() {
             Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
             None => word.to_string(),
         };
     }
-    let typed: Vec<char> = typed.chars().collect();
-    word.chars()
-        .enumerate()
-        .map(|(i, c)| match typed.get(i) {
-            Some(t) if t.is_uppercase() => c.to_uppercase().collect::<String>(),
-            Some(t) if t.is_lowercase() => c.to_lowercase().collect::<String>(),
-            _ => c.to_string(),
-        })
-        .collect()
+    word.to_string()
 }
 
 /// Order a follower list strongest first, breaking ties alphabetically, so the order
@@ -592,6 +587,19 @@ impl Dictionary {
     /// not comparable, so each order is turned into a probability over its own
     /// context first and only then mixed together.
     pub fn suggest(&self, prefix: &str, ctx: &Context, limit: usize) -> Vec<String> {
+        self.suggest_with(prefix, ctx, limit, true)
+    }
+
+    /// [`Dictionary::suggest`], with the typo fallback for a prefix no word starts with
+    /// left out when `typo_fallback` is false (it also stays out while typo correction
+    /// is turned off)
+    pub fn suggest_with(
+        &self,
+        prefix: &str,
+        ctx: &Context,
+        limit: usize,
+        typo_fallback: bool,
+    ) -> Vec<String> {
         if prefix.is_empty() {
             return Vec::new();
         }
@@ -648,11 +656,7 @@ impl Dictionary {
             .collect();
         // Ties fall back to the words themselves, so the bar never reorders itself
         // between two identical requests
-        ranked.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.cmp(b.1))
-        });
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(b.1)));
 
         let mut results: Vec<String> = ranked
             .into_iter()
@@ -663,6 +667,7 @@ impl Dictionary {
         // 4. If exact prefix matching yielded NO candidates, fall back to similarity search!
         //    The vocabulary is English, so only queries containing Latin letters can be near a word
         if self.typo_correction
+            && typo_fallback
             && results.is_empty()
             && lower_prefix.len() >= 2
             && lower_prefix.chars().any(|c| c.is_ascii_alphabetic())
@@ -696,22 +701,27 @@ impl Dictionary {
         let mut weighted = 0.0;
         let mut weight = 0.0;
 
-        if let Some(frequency) = self.frequency_of(word)
-            && self.unigram_total > 0
-        {
+        // Every candidate is held to the unigram order, a word the dictionary does not
+        // know (a possessive from the context tables, say) with a frequency of zero, so
+        // that the renormalization below is the same for all candidates in this context
+        if self.unigram_total > 0 {
+            let frequency = self.frequency_of(word).unwrap_or(0);
             weighted += self.ranking.unigram * (frequency as f64 / self.unigram_total as f64);
             weight += self.ranking.unigram;
         }
 
         if let Some(prev) = &ctx.prev {
-            if let Some(total) = self.bigram_totals.get(prev) {
-                weighted += self.ranking.bigram * (ev.bigram as f64 / *total as f64);
+            if let Some(&total) = self.bigram_totals.get(prev)
+                && total > 0
+            {
+                weighted += self.ranking.bigram * (ev.bigram as f64 / total as f64);
                 weight += self.ranking.bigram;
             }
             if let Some(prev_prev) = &ctx.prev_prev
-                && let Some(total) = self.trigram_totals.get(&(prev_prev.clone(), prev.clone()))
+                && let Some(&total) = self.trigram_totals.get(&(prev_prev.clone(), prev.clone()))
+                && total > 0
             {
-                weighted += self.ranking.trigram * (ev.trigram as f64 / *total as f64);
+                weighted += self.ranking.trigram * (ev.trigram as f64 / total as f64);
                 weight += self.ranking.trigram;
             }
         }
@@ -1137,8 +1147,11 @@ mod tests {
         assert_eq!(match_case("prog", "program"), "program");
         assert_eq!(match_case("Prog", "program"), "Program");
         assert_eq!(match_case("PROG", "program"), "PROGRAM");
-        // Whatever has not been typed yet stays as the dictionary spells it
-        assert_eq!(match_case("proG", "program"), "proGram");
+        // Inner capitals are a held Shift or an identifier's segment, never copied
+        assert_eq!(match_case("THe", "they"), "They");
+        assert_eq!(match_case("proG", "program"), "program");
+        // One capital letter is a capitalized word, not an acronym
+        assert_eq!(match_case("É", "émile"), "Émile");
         assert_eq!(match_case("i", "i"), "I");
         assert_eq!(match_case("i", "i'm"), "I'm");
     }

@@ -13,6 +13,9 @@
 # Rust build output
 typesuggest/target/
 
+# Held-out tables and cases written by data/make_eval_data.py
+typesuggest/evaldata/
+
 # Python bytecode from the data build scripts
 typesuggest/data/__pycache__/
 *.pyc

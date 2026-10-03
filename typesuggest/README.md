@@ -22,7 +22,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
   - Can be toggled on/off on the fly via `--learn`/`--no-learn` or in configuration.
 - **Microsecond Prefix Matching:**
   - High-performance in-memory Trie with top 50,000 common English words ranked by frequency.
-  - Typical lookup latency: **< 0.005 ms** (5 microseconds).
+  - Typical lookup latency, context scoring included: **~0.02 ms** (about 20 microseconds).
   - Preserves user capitalization (e.g. `prog` -> `program`, `Prog` -> `Program`, `PROG` -> `PROGRAM`).
 - **Identifier-Aware Completion:**
   - Completes only the segment you are typing inside `snake_case`, `kebab-case`, and `camelCase` names, leaving the rest of the identifier untouched (`myProg` -> `myProgram`, `get_prog` -> `get_program`, `HTTPServ` -> `HTTPService`).
@@ -35,8 +35,8 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
   - Rendered at 2x for crisp text on scaled displays, using Liberation Sans or DejaVu Sans (or Segoe UI if installed under `~/.local/share/fonts/windows`), or any font you configure.
 - **Lightweight:**
   - Event-driven: 0% CPU while idle.
-  - ~100–120 MB RAM (the 50,000-word dictionary and 320,000-pair language model are kept in memory).
-  - Single ~7 MB binary with the dictionary embedded.
+  - ~200 MB RAM (the 50,000-word dictionary and the 320,000-pair and 319,000-triple language model are kept in memory).
+  - Single ~13 MB binary with the dictionary and language model embedded.
 
 ---
 

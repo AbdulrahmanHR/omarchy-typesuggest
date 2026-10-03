@@ -118,32 +118,42 @@ fn prev_word_span(before: &[char], end: usize) -> Option<(usize, usize)> {
 }
 
 /// Whether a word can condition a completion: real letters only, so digits and
-/// codes stay out of the n-gram tables' keys, and at least two characters.
+/// codes stay out of the n-gram tables' keys, and at least two characters apart from
+/// the words "i" and "a", which start a good share of the tables' phrases.
 fn clean_context_word(word: &str) -> Option<String> {
     let clean = word.trim().to_lowercase().replace('\u{2019}', "'");
-    (clean.chars().count() >= 2 && clean.chars().all(|c| c.is_alphabetic() || c == '\''))
-        .then_some(clean)
+    let long_enough = clean.chars().count() >= 2 || clean == "i" || clean == "a";
+    (long_enough && clean.chars().all(|c| c.is_alphabetic() || c == '\'')).then_some(clean)
+}
+
+/// Whether an identifier segment begins at `chars[i]`. Segments break where a capital
+/// letter follows a lower-case letter or a digit ("myProg"), and where a run of at least
+/// three capitals ends before a word of two or more lower-case letters, so that
+/// "HTTPServer" reads as "HTTP" plus "Server" while a held Shift ("THe", "HEllo") and
+/// a plural acronym ("APIs", "URLs") stay one word.
+fn is_segment_boundary(chars: &[char], i: usize) -> bool {
+    if i == 0 || !chars[i].is_uppercase() {
+        return false;
+    }
+    let prev = chars[i - 1];
+    let capital_after_lower = prev.is_lowercase() || prev.is_numeric();
+    let end_of_capital_run = i >= 2
+        && prev.is_uppercase()
+        && chars[i - 2].is_uppercase()
+        && chars.get(i + 1).is_some_and(|c| c.is_lowercase())
+        && chars.get(i + 2).is_some_and(|c| c.is_lowercase());
+    capital_after_lower || end_of_capital_run
 }
 
 /// Where the identifier segment ending at `end` begins, for a word that starts at
-/// `word_start`. Segments break where a capital letter follows a lower-case letter or a
-/// digit ("myProg"), and where a run of capitals ends before a lower-case letter, so that
-/// "HTTPServer" reads as "HTTP" plus "Server".
+/// `word_start` (see [`is_segment_boundary`])
 fn segment_start(chars: &[char], word_start: usize, end: usize) -> usize {
     // Walking back from the caret, the first boundary found is the one nearest it, which
     // is where the segment being typed begins
-    for i in (word_start + 1..end).rev() {
-        let c = chars[i];
-        let prev = chars[i - 1];
-        let capital_after_lower = c.is_uppercase() && (prev.is_lowercase() || prev.is_numeric());
-        let end_of_capital_run = c.is_uppercase()
-            && prev.is_uppercase()
-            && chars.get(i + 1).is_some_and(|next| next.is_lowercase());
-        if capital_after_lower || end_of_capital_run {
-            return i;
-        }
-    }
-    word_start
+    (word_start + 1..end)
+        .rev()
+        .find(|&i| is_segment_boundary(chars, i))
+        .unwrap_or(word_start)
 }
 
 /// The two words preceding the word that starts at `word_start`, nearest first
@@ -306,13 +316,11 @@ impl InputBuffer {
         self.cursor = self.chars.len();
     }
 
-    /// Extract the current word prefix immediately preceding the cursor, and the
-    /// two words before it that condition the completion
-    pub fn current_word_context(&self) -> (String, Context) {
+    /// Where the word around the caret starts, and where the segment of it being typed
+    /// starts (the same place unless the word is an identifier such as "myProg")
+    fn word_and_segment_start(&self) -> (usize, usize) {
         let cur = self.cursor.min(self.chars.len());
         let before = &self.chars[..cur];
-
-        // Find the start of the word being typed
         let mut cur_word_start = cur;
         for (i, &c) in before.iter().enumerate().rev() {
             if is_word_char(c) {
@@ -321,15 +329,34 @@ impl InputBuffer {
                 break;
             }
         }
+        (cur_word_start, segment_start(before, cur_word_start, cur))
+    }
+
+    /// Whether the caret is in a later segment of an identifier ("Prog" in "myProg")
+    pub fn in_identifier_segment(&self) -> bool {
+        let (word_start, segment_begin) = self.word_and_segment_start();
+        segment_begin > word_start
+    }
+
+    /// Extract the current word prefix immediately preceding the cursor, and the
+    /// two words before it that condition the completion
+    pub fn current_word_context(&self) -> (String, Context) {
+        let cur = self.cursor.min(self.chars.len());
+        let before = &self.chars[..cur];
 
         // Inside an identifier only the segment being typed is completed, so "myProg"
         // offers "myProgram" instead of looking for a word starting with "myProg". The
-        // context still comes from before the whole word, since "my" is part of this word
-        // rather than a word of its own.
-        let segment_begin = segment_start(before, cur_word_start, cur);
+        // words before an identifier say nothing about its later segments, so these are
+        // completed without context, which also keeps them out of learned phrases.
+        let (cur_word_start, segment_begin) = self.word_and_segment_start();
         let prefix: String = before[segment_begin..cur].iter().collect();
+        let context = if segment_begin > cur_word_start {
+            Context::default()
+        } else {
+            context_before(before, cur_word_start)
+        };
 
-        (prefix.clone(), context_before(before, cur_word_start))
+        (prefix, context)
     }
 
     /// The prefix, and only the word right before it
@@ -338,19 +365,25 @@ impl InputBuffer {
         (prefix, ctx.prev)
     }
 
-    /// Extract the current word suffix immediately following the cursor
+    /// Extract the current word suffix immediately following the cursor, up to the end
+    /// of the word or of the identifier segment the caret is in ("er" in "getUs|erName")
     pub fn current_word_suffix(&self) -> String {
         let cur = self.cursor.min(self.chars.len());
-        let after = &self.chars[cur..];
-        let mut end = 0;
-        for (i, &c) in after.iter().enumerate() {
-            if is_word_char(c) {
-                end = i + 1;
-            } else {
-                break;
-            }
+        let mut end = cur;
+        while end < self.chars.len()
+            && is_word_char(self.chars[end])
+            && !is_segment_boundary(&self.chars, end)
+        {
+            end += 1;
         }
-        after[..end].iter().collect()
+        self.chars[cur..end].iter().collect()
+    }
+
+    /// Whether more of the word follows the current suffix, i.e. the caret is in an
+    /// identifier segment that has further segments after it
+    pub fn word_continues_after_suffix(&self) -> bool {
+        let end = self.cursor.min(self.chars.len()) + self.current_word_suffix().chars().count();
+        self.chars.get(end).is_some_and(|&c| is_word_char(c))
     }
 
     /// Replace the current word around the cursor with the replacement string
@@ -390,9 +423,10 @@ pub struct StateMachine {
     pub accept_keys: AcceptKeys,
     /// Append a space after the committed word
     pub trailing_space: bool,
-    /// Last (prefix, context) lookup and its result. GUI apps echo each keystroke back
-    /// as surrounding text, which would otherwise repeat the same lookup two or three times.
-    last_suggestion: Option<(String, Context, Vec<String>)>,
+    /// Last (prefix, context, typo fallback) lookup and its result. GUI apps echo each
+    /// keystroke back as surrounding text, which would otherwise repeat the same lookup
+    /// two or three times.
+    last_suggestion: Option<(String, Context, bool, Vec<String>)>,
 }
 
 impl Default for StateMachine {
@@ -423,16 +457,25 @@ impl StateMachine {
         self.invalidate_suggestions();
     }
 
-    /// Memoized `Dictionary::suggest` for the current prefix and context
+    /// Memoized `Dictionary::suggest` for the current prefix and context. A later segment
+    /// of an identifier gets no typo fallback: "ello" in "HEllo" is not a misspelled word,
+    /// and offering "Hello" for it would commit "HHello".
     fn suggest(&mut self, dict: &Dictionary, prefix: &str, ctx: &Context) -> Vec<String> {
-        if let Some((p, c, candidates)) = &self.last_suggestion
+        let typo_fallback = !self.buffer.in_identifier_segment();
+        if let Some((p, c, t, candidates)) = &self.last_suggestion
             && p == prefix
             && c == ctx
+            && *t == typo_fallback
         {
             return candidates.clone();
         }
-        let candidates = dict.suggest(prefix, ctx, self.max_candidates);
-        self.last_suggestion = Some((prefix.to_string(), ctx.clone(), candidates.clone()));
+        let candidates = dict.suggest_with(prefix, ctx, self.max_candidates, typo_fallback);
+        self.last_suggestion = Some((
+            prefix.to_string(),
+            ctx.clone(),
+            typo_fallback,
+            candidates.clone(),
+        ));
         candidates
     }
 
@@ -490,26 +533,25 @@ impl StateMachine {
         let before_cursor = &text[..cursor_bytes];
         let after_cursor = &text[cursor_bytes..];
 
-        let word_prefix = extract_word_prefix(before_cursor);
-        let word_suffix = extract_word_suffix(after_cursor);
-        let prev_slice = &before_cursor[..before_cursor.len().saturating_sub(word_prefix.len())];
-        let context = extract_context_from_slice(prev_slice);
-
-        // Always sync the internal buffer with compositor surrounding text
+        // Always sync the internal buffer with compositor surrounding text, then read the
+        // word at the caret from it exactly as typed keys do, so the segment offered here
+        // is the same one a commit replaces
         self.buffer
             .sync_from_surrounding(before_cursor, after_cursor);
+        let (word_prefix, context) = self.buffer.current_word_context();
+        let word_suffix = self.buffer.current_word_suffix();
 
         if word_prefix.chars().count() >= self.min_prefix_length
             && word_prefix.chars().any(|c| c.is_alphabetic())
         {
-            let candidates = self.suggest(dict, word_prefix, &context);
+            let candidates = self.suggest(dict, &word_prefix, &context);
             if !candidates.is_empty() {
                 match &self.mode {
                     InputMode::Navigating { selected_index, .. } => {
                         let sel = (*selected_index).min(candidates.len() - 1);
                         self.mode = InputMode::Navigating {
-                            prefix: word_prefix.to_string(),
-                            suffix: word_suffix.to_string(),
+                            prefix: word_prefix,
+                            suffix: word_suffix,
                             candidates: candidates.clone(),
                             selected_index: sel,
                         };
@@ -517,12 +559,12 @@ impl StateMachine {
                     }
                     _ => {
                         self.mode = InputMode::Suggesting {
-                            prefix: word_prefix.to_string(),
-                            suffix: word_suffix.to_string(),
+                            prefix: word_prefix.clone(),
+                            suffix: word_suffix,
                             candidates: candidates.clone(),
                         };
                         return KeyAction::ShowSuggestions {
-                            prefix: word_prefix.to_string(),
+                            prefix: word_prefix,
                             candidates,
                         };
                     }
@@ -658,11 +700,14 @@ impl StateMachine {
                     let (prefix, context) = self.buffer.current_word_context();
                     let prev_word = context.prev.clone();
                     let suffix = self.buffer.current_word_suffix();
-                    let replacement = if self.trailing_space {
-                        format!("{} ", chosen)
-                    } else {
-                        chosen.clone()
-                    };
+                    // A segment completed in the middle of an identifier ("getUs|erName")
+                    // must not split it with a space
+                    let replacement =
+                        if self.trailing_space && !self.buffer.word_continues_after_suffix() {
+                            format!("{} ", chosen)
+                        } else {
+                            chosen.clone()
+                        };
                     self.buffer.apply_replacement(
                         prefix.chars().count(),
                         suffix.chars().count(),
@@ -1020,7 +1065,7 @@ mod tests {
             ("getProg", "Prog", "getProgram "),
             ("utf8Prog", "Prog", "utf8Program "),
             // A run of capitals ends before the capitalised word that follows it
-            ("HTTPServ", "Serv", "HTTPScreen "),
+            ("HTTPScr", "Scr", "HTTPScreen "),
             // Separators already split the word, and stay untouched
             ("my_prog", "prog", "my_program "),
             ("my-prog", "prog", "my-program "),
@@ -1080,6 +1125,115 @@ mod tests {
         let (_, ctx) = sm.buffer.current_word_context();
         assert_eq!(ctx.prev, None);
         assert_eq!(ctx.prev_prev, None);
+    }
+
+    #[test]
+    fn test_identifier_segment_completes_through_surrounding_text() {
+        let dict = setup_dict();
+        // GUI apps report the text after every key; the segment offered from it must be the
+        // one a commit replaces, or "myProg" would come out as "myprogram" glued to "my"
+        for (text, result) in [
+            ("myProg", "myProgram "),
+            ("HTTPScr", "HTTPScreen "),
+            ("my_prog", "my_program "),
+        ] {
+            let mut sm = StateMachine::new(2);
+            for c in text.chars() {
+                sm.handle_key_press(c as u32, Some(c), false, &dict);
+            }
+            let act = sm.handle_surrounding_text(text, text.len(), text.len(), &dict);
+            assert!(
+                matches!(act, KeyAction::ShowSuggestions { .. }),
+                "{text:?} gave {act:?}"
+            );
+            sm.handle_key_press(KEY_UP, None, false, &dict);
+            sm.handle_key_press(KEY_TAB, None, false, &dict);
+            assert_eq!(sm.buffer.chars.iter().collect::<String>(), result);
+        }
+    }
+
+    #[test]
+    fn test_identifier_segment_is_not_learned_after_the_word_before_it() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(2);
+        // "let myProgram" must not teach that "program" follows "let"
+        for c in "let myProg".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        let act = sm.handle_key_press(KEY_TAB, None, false, &dict);
+        assert!(
+            matches!(
+                &act,
+                KeyAction::CommitCandidate {
+                    prev_word: None,
+                    ..
+                }
+            ),
+            "{act:?}"
+        );
+    }
+
+    #[test]
+    fn test_held_shift_and_plural_acronyms_stay_one_word() {
+        for word in ["THe", "HEllo", "APIs", "URLs", "GPUs", "IOe", "PDFs"] {
+            let mut buffer = InputBuffer::new();
+            for c in word.chars() {
+                buffer.insert_char(c);
+            }
+            assert_eq!(buffer.current_word_context().0, word, "{word:?} was split");
+        }
+        for (word, segment) in [("IOErr", "Err"), ("HTTPServ", "Serv"), ("XMLHttp", "Http")] {
+            let mut buffer = InputBuffer::new();
+            for c in word.chars() {
+                buffer.insert_char(c);
+            }
+            assert_eq!(
+                buffer.current_word_context().0,
+                segment,
+                "segment of {word:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_inner_segment_gets_no_typo_correction() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(2);
+        // "Helo" alone is a typo of "hello"; as a later segment it is part of a name
+        for c in "myHelo".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        assert_eq!(sm.mode, InputMode::Idle);
+        let mut sm = StateMachine::new(2);
+        for c in "Helo".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        assert!(matches!(sm.mode, InputMode::Suggesting { .. }));
+    }
+
+    #[test]
+    fn test_retro_edit_inside_identifier_keeps_later_segments() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(2);
+        for c in "getProgName".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        // Caret back to "getPro|gName"
+        for _ in 0.."gName".len() {
+            sm.handle_key_press(KEY_LEFT, None, false, &dict);
+        }
+        sm.handle_key_press(KEY_BACKSPACE, None, false, &dict);
+        sm.handle_key_press('o' as u32, Some('o'), false, &dict);
+        assert_eq!(sm.buffer.current_word_suffix(), "g");
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        let act = sm.handle_key_press(KEY_TAB, None, false, &dict);
+        assert!(
+            matches!(&act, KeyAction::CommitCandidate { deleted_after, replacement, .. }
+                if deleted_after == "g" && replacement == "Program"),
+            "{act:?}"
+        );
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "getProgramName");
     }
 
     /// Whether the engine swallows the keystroke for this action instead of forwarding it

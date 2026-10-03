@@ -74,7 +74,7 @@ fn score(dict: &Dictionary, cases: &[Case], limit: usize) -> (f64, f64, f64) {
 fn main() {
     let dir = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/tmp/opencode/eval".to_string());
+        .unwrap_or_else(|| "/tmp/eval".to_string());
     let sample: usize = std::env::var("EVAL_SAMPLE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -144,11 +144,12 @@ fn main() {
 
         println!("  -- trigram weight sweep --");
         for tw in [0.0f64, 0.15, 0.3, 0.45, 0.6, 0.8] {
+            let bigram = (1.0 - tw).max(0.0) * 0.78;
             run(
-                &format!("trigram {tw} bigram {}", (1.0 - tw * 0.78).round()),
+                &format!("trigram {tw} bigram {bigram:.2}"),
                 Ranking {
                     trigram: tw,
-                    bigram: (1.0 - tw).max(0.0) * 0.78,
+                    bigram,
                     ..Ranking::default()
                 },
                 &mut d,

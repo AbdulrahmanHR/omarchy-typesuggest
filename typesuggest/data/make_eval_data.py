@@ -23,7 +23,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from build_bigrams import iter_clauses, load_vocabulary, make_known
 from build_trigrams import MIN_COUNT as TRI_MIN_COUNT, MAX_FOLLOWERS as TRI_MAX_FOLLOWERS
-from build_bigrams import MAX_FOLLOWERS as BI_MAX_FOLLOWERS
+from build_bigrams import MIN_COUNT as BI_MIN_COUNT, MAX_FOLLOWERS as BI_MAX_FOLLOWERS
 
 WORD = re.compile(r"[a-z]+(?:'[a-z]+)?")
 EVAL_PERCENT = 10
@@ -38,7 +38,14 @@ def is_eval(sentence_id):
 def write_tables(train_pairs, train_triples, outdir):
     with open(os.path.join(outdir, "bigrams.tsv"), "w") as f:
         for first in sorted(train_pairs):
-            ranked = sorted(train_pairs[first].items(), key=lambda i: (-i[1], i[0]))
+            ranked = sorted(
+                (
+                    (second, count)
+                    for second, count in train_pairs[first].items()
+                    if count >= BI_MIN_COUNT
+                ),
+                key=lambda i: (-i[1], i[0]),
+            )
             for second, count in ranked[:BI_MAX_FOLLOWERS]:
                 f.write(f"{first}\t{second}\t{count}\n")
 
