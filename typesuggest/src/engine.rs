@@ -56,6 +56,29 @@ const BTN_LEFT: u32 = 0x110;
 /// pointer, would otherwise take a word nobody chose.
 const CLICK_GUARD: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// How long after a key press the app's report of the text can still be the keystroke's echo.
+/// Apps report within milliseconds; a change arriving later came from a click or the app itself.
+const KEY_ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Whether a surrounding text report at `now` can be the app's echo of the user's typing: a key
+/// is held (the app repeats it), or one was pressed within `KEY_ECHO_WINDOW`
+fn may_echo_typing(
+    key_held: bool,
+    last_key_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    key_held || last_key_at.is_some_and(|at| now.saturating_duration_since(at) < KEY_ECHO_WINDOW)
+}
+
+/// Whether Hyprland put the popup below the caret although the bar is configured above it. The
+/// popup is then taller than the monitor, so Hyprland only does that once the caret has scrolled
+/// off the top of the screen, and the bar at the popup's bottom edge would show up near the
+/// bottom of the screen. `rect_y` is the caret's top in `text_input_rectangle`, which is negative
+/// below the caret (the caret sits above the popup's origin) and the popup's height above it.
+fn caret_scrolled_off_top(position: BarPosition, rect_y: i32) -> bool {
+    position == BarPosition::Above && rect_y <= 0
+}
+
 /// The cursor over the popup: a hand over a suggestion, which a click takes, else an arrow
 fn cursor_shape_at(pill: Option<usize>) -> CursorShape {
     if pill.is_some() {
@@ -224,6 +247,9 @@ pub struct Engine {
     /// pointer leaves and whenever the popup may have moved since, so a click only counts
     /// where the pointer was seen over the bar as it is now.
     pub pointer_pos: Option<(f64, f64)>,
+    /// The pointer is on the popup surface (between its enter and leave). Unlike
+    /// `pointer_pos`, a popup that moves under it does not clear this.
+    pub pointer_over_popup: bool,
     /// The suggestion under the pointer, drawn highlighted like a keyboard selection while
     /// `hover_highlight` is on
     pub hover_index: Option<usize>,
@@ -242,6 +268,8 @@ pub struct Engine {
     pub repeat_delay: i32,
     /// The last forwarded key while it is held down
     pub held_key: Option<HeldKey>,
+    /// When a key was last pressed in a text field (see `may_echo_typing`)
+    pub last_key_at: Option<std::time::Instant>,
     /// When the held key starts repeating in the app; the main loop calls on_repeat_deadline
     pub repeat_deadline: Option<std::time::Instant>,
     /// Background writer for the learned phrases, so the disk sync never delays typing
@@ -301,6 +329,7 @@ impl Engine {
             pointer: None,
             bar_areas: None,
             pointer_pos: None,
+            pointer_over_popup: false,
             hover_index: None,
             cursor_shape_manager: None,
             cursor_shape_device: None,
@@ -310,6 +339,7 @@ impl Engine {
             repeat_rate: 25,
             repeat_delay: 600,
             held_key: None,
+            last_key_at: None,
             repeat_deadline: None,
         })
     }
@@ -553,6 +583,16 @@ impl Engine {
             return;
         }
 
+        // Long after the last key, a change in the text came from a click or the app, and only
+        // typing brings up the bar
+        if !may_echo_typing(
+            self.held_key.is_some(),
+            self.last_key_at,
+            std::time::Instant::now(),
+        ) {
+            self.state_machine.stop_editing();
+        }
+
         let action = self.state_machine.handle_surrounding_text(
             &text,
             cursor as usize,
@@ -746,7 +786,7 @@ impl Engine {
         // moves over that part; otherwise it stays, and a click there only hides it.
         if self.config.bar_position == BarPosition::Above && self.config.mouse_hides_bar && !on_bar
         {
-            self.state_machine.mode = InputMode::Idle;
+            self.state_machine.dismiss();
             self.hide();
             return;
         }
@@ -775,7 +815,7 @@ impl Engine {
             && self.config.bar_position == BarPosition::Above
             && !self.pointer_on_bar()
         {
-            self.state_machine.mode = InputMode::Idle;
+            self.state_machine.dismiss();
             self.hide();
         }
     }
@@ -790,6 +830,18 @@ impl Engine {
         } else {
             self.input_off_bar();
         }
+    }
+
+    /// A mouse button went down somewhere on the screen. Unless that was on the popup, whose own
+    /// button events decide what a press there does, the user clicked away from the bar: close
+    /// it until they type again. Apps such as terminals never report that a click moved the
+    /// caret, so this is the only way to see such a click there.
+    pub fn on_button_anywhere(&mut self) {
+        if self.pointer_over_popup {
+            return;
+        }
+        self.state_machine.dismiss();
+        self.hide();
     }
 
     /// Ctrl, Alt or Super is held down
@@ -1001,6 +1053,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Engine {
             } if state.popup_surface.as_ref() == Some(&surface) => {
                 // Each enter needs its own cursor, named by this serial
                 state.pointer_enter_serial = Some(serial);
+                state.pointer_over_popup = true;
                 state.cursor_shape = None;
                 state.pointer_moved(surface_x, surface_y, qh);
             }
@@ -1012,6 +1065,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Engine {
                 state.pointer_moved(surface_x, surface_y, qh);
             }
             wl_pointer::Event::Leave { .. } => {
+                state.pointer_over_popup = false;
                 state.pointer_enter_serial = None;
                 state.cursor_shape = None;
                 if state.forget_pointer() {
@@ -1166,6 +1220,22 @@ impl Dispatch<zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2, ()> for Engine
                 state.placeholder_deferrals += 1;
                 state.awaiting_caret_rect = true;
                 state.hide();
+            } else if caret_scrolled_off_top(state.config.bar_position, y) {
+                // The caret is off the top of the screen: hide the bar rather than show it at the
+                // bottom. Right after a key, Hyprland may still hold the caret from before the
+                // app scrolled it back into view, so the app's report of that key may bring the
+                // bar back; after a scroll alone it stays closed until the user types again.
+                state.awaiting_caret_rect = false;
+                if may_echo_typing(
+                    state.held_key.is_some(),
+                    state.last_key_at,
+                    std::time::Instant::now(),
+                ) {
+                    state.state_machine.mode = InputMode::Idle;
+                } else {
+                    state.state_machine.dismiss();
+                }
+                state.hide();
             } else {
                 state.awaiting_caret_rect = false;
             }
@@ -1254,8 +1324,24 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for Engine {
                     state.is_sensitive_wayland = secret;
                     state.refresh_sensitivity();
                 }
-                if let Some((text, cursor, anchor)) = state.pending_surrounding.take() {
-                    state.apply_surrounding_text(qh, text, cursor, anchor);
+                match state.pending_surrounding.take() {
+                    Some((text, cursor, anchor)) => {
+                        state.apply_surrounding_text(qh, text, cursor, anchor);
+                    }
+                    // Apps that never report their text (terminals) still commit when the caret
+                    // moves on screen. Long after the last key, program output or a scroll
+                    // moved it, and the word the bar was for is no longer at the caret.
+                    None if state.surrounding.is_none()
+                        && !may_echo_typing(
+                            state.held_key.is_some(),
+                            state.last_key_at,
+                            std::time::Instant::now(),
+                        ) =>
+                    {
+                        state.state_machine.dismiss();
+                        state.hide();
+                    }
+                    None => {}
                 }
 
                 // Disabled apps are left alone entirely, as if no input method were running
@@ -1387,7 +1473,6 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         forward!();
                         return;
                     }
-
                     let mut keysym_raw = 0u32;
                     let mut char_opt = None;
                     let mut ctrl_active = false;
@@ -1403,6 +1488,10 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         let active = |m| xkb_state.mod_name_is_active(m, xkb::STATE_MODS_EFFECTIVE);
                         ctrl_active = active(xkb::MOD_NAME_CTRL);
                         alt_or_super = active(xkb::MOD_NAME_ALT) || active(xkb::MOD_NAME_LOGO);
+                    }
+                    // Shift or Ctrl going down changes nothing the app reports
+                    if !is_modifier_keysym(keysym_raw) {
+                        state.last_key_at = Some(std::time::Instant::now());
                     }
 
                     // While the bar is held back waiting for a caret rectangle the user cannot see
@@ -1562,6 +1651,8 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         vk.key(time, key, 0);
                     }
                     if let Some(held) = state.held_key.filter(|h| h.key == key) {
+                        // The app repeated the key until now, and may still report its last repeat
+                        state.last_key_at = Some(std::time::Instant::now());
                         state.held_key = None;
                         state.repeat_deadline = None;
                         state.apply_key_repeats(held, time, qh);
@@ -1607,6 +1698,33 @@ mod tests {
             Some(now + std::time::Duration::from_millis(5)),
             now
         ));
+    }
+
+    #[test]
+    fn test_reports_echo_typing_only_shortly_after_a_key() {
+        let now = std::time::Instant::now();
+        let ago = |ms| {
+            now.checked_sub(std::time::Duration::from_millis(ms))
+                .unwrap()
+        };
+        assert!(may_echo_typing(false, Some(ago(0)), now));
+        assert!(may_echo_typing(false, Some(ago(1499)), now));
+        assert!(!may_echo_typing(false, Some(ago(1500)), now));
+        assert!(!may_echo_typing(false, None, now));
+        // The app keeps repeating a held key, and reporting each repeat, for as long as it is held
+        assert!(may_echo_typing(true, Some(ago(10_000)), now));
+    }
+
+    #[test]
+    fn test_bar_above_hides_when_hyprland_puts_it_below_the_caret() {
+        // Above the caret, text_input_rectangle has the caret below the popup's origin, at the
+        // popup's height; once the caret scrolls off the top it is above the origin
+        assert!(!caret_scrolled_off_top(BarPosition::Above, 896));
+        assert!(caret_scrolled_off_top(BarPosition::Above, -20));
+        assert!(caret_scrolled_off_top(BarPosition::Above, 0));
+        // Below the caret is where the bar belongs
+        assert!(!caret_scrolled_off_top(BarPosition::Below, -20));
+        assert!(!caret_scrolled_off_top(BarPosition::Below, 32));
     }
 
     #[test]

@@ -70,16 +70,40 @@ fn get_hyprland_socket_path() -> Option<PathBuf> {
         .find(|sock| UnixStream::connect(sock).is_ok())
 }
 
+/// Hyprland's event socket (socket2), next to its request socket
+pub fn get_hyprland_event_socket_path() -> Option<PathBuf> {
+    Some(get_hyprland_socket_path()?.with_file_name(".socket2.sock"))
+}
+
 /// Send one request to Hyprland's IPC socket and return the reply
 fn hyprland_request(request: &[u8]) -> Option<String> {
+    // Generous cap: "pid" comes after the (possibly long) window title
+    send_request(request, Duration::from_millis(15), 65536, false)
+}
+
+/// Send one request to Hyprland's IPC socket and return the whole reply, or its first `max_len`
+/// bytes, waiting up to `timeout` for each read and write. None unless Hyprland finished its
+/// reply in time: an empty reply that timed out must not read as an empty answer.
+pub fn hyprland_request_within(
+    request: &[u8],
+    timeout: Duration,
+    max_len: usize,
+) -> Option<String> {
+    send_request(request, timeout, max_len, true)
+}
+
+/// See `hyprland_request_within`. With `complete_only` false, whatever arrived before a timeout
+/// is returned as the reply.
+fn send_request(
+    request: &[u8],
+    timeout: Duration,
+    max_len: usize,
+    complete_only: bool,
+) -> Option<String> {
     let sock_path = get_hyprland_socket_path()?;
     let mut stream = UnixStream::connect(&sock_path).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(15)))
-        .ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_millis(15)))
-        .ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
 
     stream.write_all(request).ok()?;
 
@@ -90,11 +114,11 @@ fn hyprland_request(request: &[u8]) -> Option<String> {
             Ok(0) => break,
             Ok(n) => {
                 response.extend_from_slice(&buf[..n]);
-                // Generous cap: "pid" comes after the (possibly long) window title
-                if response.len() >= 65536 {
+                if response.len() >= max_len {
                     break;
                 }
             }
+            Err(_) if complete_only => return None,
             Err(_) => break,
         }
     }

@@ -8,6 +8,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
 
 - **Exact Windows Text Suggestions UX:**
   - Floats a compact 3-pill suggestion bar just below the text caret (above it near the bottom of the screen), starting from the very 1st letter typed.
+  - Shows up only while you type or edit. Focusing a field, clicking, moving the caret, shortcuts and scrolling never bring it up; clicking elsewhere in the text closes it, and so does scrolling the caret off the top of the screen while the bar sits above it.
   - **Press `Up`** (or `Down`, with `select_key = "down"`): Enters suggestion navigation mode without moving the document caret.
   - **Press `Left` / `Right`**: Cycles between the suggestion pills.
   - **Press `Down` or `Escape`** (`Up` or `Escape`, with `select_key = "down"`): Cancels suggestion navigation and returns focus directly to the document caret (swallowing the key). Pressing the key that entered navigation again keeps you in the bar.
@@ -28,7 +29,7 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
 - **Identifier-Aware Completion:**
   - Completes only the segment you are typing inside `snake_case`, `kebab-case`, and `camelCase` names, leaving the rest of the identifier untouched (`myProg` -> `myProgram`, `get_prog` -> `get_program`, `HTTPServ` -> `HTTPService`).
 - **Bidirectional Retro-Editing & Cross-Word Navigation:**
-  - Moving the cursor into existing words queries the dictionary for the word at the caret.
+  - Editing an existing word (after clicking or moving the caret into it) offers completions of the word at the caret, read from the app's own text where it reports it.
   - Committing cleanly replaces both the prefix before the cursor and the suffix after the cursor.
   - Full support for terminal shortcuts (`Ctrl+W`, `Ctrl+U`, `Ctrl+K`, `Ctrl+A`, `Ctrl+E`).
 - **Follows Your Omarchy Theme & HiDPI Crispness:**
@@ -53,6 +54,8 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
 ## 🧩 App Compatibility
 
 Suggestions appear in apps that support the Wayland `text-input-v3` protocol. In every other app (XWayland programs, games, apps without IME support) TypeSuggest stays out of the way and passes keys through untouched.
+
+An input method only hears about the mouse over its own bar, and terminals never report that a click moved their caret. So that a click anywhere closes the bar, TypeSuggest adds three mouse binds to Hyprland while it runs (`mouse:272`, `mouse:273` and `mouse:274` without modifiers, Hyprland 0.56 or later). They are non-consuming, so every click still reaches the app under the pointer, and they only post a `custom>>typesuggest-click` event on Hyprland's event socket. Nothing is written to your config, and binds of your own on the same buttons are left alone. TypeSuggest checks that Hyprland lists them as non-consuming, switching them off otherwise, adds them again after a config reload, and switches them off when it stops. While `hyprctl configerrors` has something to report, it waits for the next clean reload instead, because talking to Hyprland's Lua would clear that list.
 
 | App type | Status | Notes |
 |---|---|---|

@@ -86,7 +86,9 @@ programs, all of which Omarchy already ships except TypeSuggest itself:
 
 ## Using it
 
-While suggestions are showing, press <kbd>Up</kbd> to highlight the first one,
+The bar appears as you type or edit a word, and closes when you click
+elsewhere in the text or move the caret. While
+suggestions are showing, press <kbd>Up</kbd> to highlight the first one,
 <kbd>Left</kbd>/<kbd>Right</kbd> to move between them, and <kbd>Enter</kbd>,
 <kbd>Space</kbd> or <kbd>Tab</kbd> to accept, or click the one you want.
 <kbd>Down</kbd> or <kbd>Esc</kbd> backs out. If <kbd>Down</kbd> feels more

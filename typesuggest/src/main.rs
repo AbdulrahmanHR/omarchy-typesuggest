@@ -1,4 +1,7 @@
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
+use typesuggest::clicks::{self, EventSocket, HyprEvent};
 use typesuggest::config::{
     BarPosition, CliOverrides, Config, ConfigSource, config_line, parse_bar_scale, with_setting,
 };
@@ -682,15 +685,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Second roundtrip to complete bindings
     event_queue.roundtrip(&mut engine)?;
 
+    // Another input method holds the seat: leave before touching anything of the one running,
+    // such as its click binds
+    if engine.unavailable {
+        std::process::exit(EXIT_IME_UNAVAILABLE);
+    }
+
     println!("typesuggest is running and listening for text input.");
 
-    // 8. Main event loop: wait for Wayland events, or until a held key starts repeating in the
-    // app (Engine::on_repeat_deadline)
+    let stop_pipe = stop_signal_pipe();
+    let mut hyprland_events = start_click_events();
+    let mut hyprland_events_ready = false;
+
+    // 8. Main event loop: wait for Wayland events, Hyprland events or a stop signal, or until a
+    // held key starts repeating in the app (Engine::on_repeat_deadline)
     loop {
         event_queue.dispatch_pending(&mut engine)?;
         if engine.unavailable {
+            if hyprland_events.is_some() {
+                clicks::unregister();
+            }
             // The unit's RestartPreventExitStatus keeps systemd from retrying in a loop
             std::process::exit(EXIT_IME_UNAVAILABLE);
+        }
+        // After the Wayland events read with them: Hyprland posts a click just before the popup's
+        // own button event, and the pointer's enter and leave on the popup decide what it means
+        if std::mem::take(&mut hyprland_events_ready) {
+            handle_hyprland_events(&mut hyprland_events, &mut engine);
         }
         event_queue.flush()?;
 
@@ -704,28 +725,127 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tv_nsec: i64::from(left.subsec_nanos()),
             }
         });
-        let ready = {
+        let (ready, wayland_in, hyprland_in, stop) = {
+            use rustix::event::{PollFd, PollFlags};
             let fd = guard.connection_fd();
-            let mut fds = [rustix::event::PollFd::new(
-                &fd,
-                rustix::event::PollFlags::IN,
-            )];
-            rustix::event::poll(&mut fds, timeout.as_ref())
+            let mut fds = vec![PollFd::new(&fd, PollFlags::IN)];
+            let mut hyprland_at = None;
+            if let Some(socket) = &hyprland_events {
+                fds.push(PollFd::new(socket, PollFlags::IN));
+                hyprland_at = Some(fds.len() - 1);
+            }
+            let mut stop_at = None;
+            if let Some(pipe) = &stop_pipe {
+                fds.push(PollFd::new(pipe, PollFlags::IN));
+                stop_at = Some(fds.len() - 1);
+            }
+            let ready = rustix::event::poll(&mut fds, timeout.as_ref());
+            let readable = |at: Option<usize>| at.is_some_and(|i| !fds[i].revents().is_empty());
+            (
+                ready,
+                readable(Some(0)),
+                readable(hyprland_at),
+                readable(stop_at),
+            )
         };
+        if stop {
+            drop(guard);
+            if hyprland_events.is_some() {
+                clicks::unregister();
+            }
+            println!("typesuggest stopped.");
+            return Ok(());
+        }
+        hyprland_events_ready = hyprland_in;
         match ready {
             Ok(0) => {
                 drop(guard);
                 engine.on_repeat_deadline();
             }
-            Ok(_) => match guard.read() {
+            Ok(_) if wayland_in => match guard.read() {
                 Ok(_) => {}
                 Err(wayland_client::backend::WaylandError::Io(e))
                     if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(e.into()),
             },
+            Ok(_) => drop(guard),
             Err(rustix::io::Errno::INTR) => {}
             Err(e) => return Err(e.into()),
         }
+    }
+}
+
+/// Write end of the pipe that wakes the main loop when a stop signal arrives
+static STOP_PIPE: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn on_stop_signal(_: libc::c_int) {
+    let fd = STOP_PIPE.load(Ordering::Relaxed);
+    if fd >= 0 {
+        // write(2) is async-signal-safe; a full pipe already wakes the loop
+        unsafe { libc::write(fd, [1u8].as_ptr().cast(), 1) };
+    }
+}
+
+/// A pipe that turns readable when SIGTERM, SIGINT or SIGHUP arrives, so that the main loop can
+/// take its click binds out of Hyprland before the daemon exits
+fn stop_signal_pipe() -> Option<OwnedFd> {
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+        return None;
+    }
+    // The write end stays open for the life of the process, for the handler
+    let read_end = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    STOP_PIPE.store(fds[1], Ordering::Relaxed);
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = on_stop_signal as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigaction(signal, &action, std::ptr::null_mut());
+        }
+    }
+    Some(read_end)
+}
+
+/// Listen on Hyprland's event socket and add the click binds (see `clicks`). The socket is opened
+/// first, so a config reload in between is not missed, and kept even when the binds cannot be
+/// added yet (a config with errors), so that the next reload tries again. Until they are added,
+/// the bar closes on clicks only where the app reports a moved caret. None without Hyprland.
+fn start_click_events() -> Option<EventSocket> {
+    let socket = EventSocket::connect()?;
+    register_click_binds("");
+    Some(socket)
+}
+
+/// Add the click binds, saying in the log whether that worked; `when` qualifies the warning
+fn register_click_binds(when: &str) {
+    match clicks::register() {
+        Ok(()) => println!("Clicks outside the suggestion bar close it"),
+        Err(e) => eprintln!(
+            "[typesuggest] Warning: cannot watch mouse clicks through Hyprland{} ({}); clicks in terminals will not close the bar",
+            when, e
+        ),
+    }
+}
+
+/// Act on what Hyprland posted: close the bar on a click, and add the binds again after a config
+/// reload dropped them
+fn handle_hyprland_events(events: &mut Option<EventSocket>, engine: &mut Engine) {
+    let Some(socket) = events else {
+        return;
+    };
+    match socket.read_events() {
+        Ok(list) => {
+            for event in list {
+                match event {
+                    HyprEvent::Click => engine.on_button_anywhere(),
+                    HyprEvent::ConfigReloaded => register_click_binds(" after the config reload"),
+                }
+            }
+        }
+        // Hyprland closed the socket: start over
+        Err(_) => *events = start_click_events(),
     }
 }
 

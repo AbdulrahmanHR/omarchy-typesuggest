@@ -1,3 +1,4 @@
+pub mod clicks;
 pub mod config;
 pub mod dict;
 pub mod engine;

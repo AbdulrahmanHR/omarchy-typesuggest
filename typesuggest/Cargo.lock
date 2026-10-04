@@ -335,6 +335,7 @@ name = "typesuggest"
 version = "1.2.1"
 dependencies = [
  "fontdue",
+ "libc",
  "rustix",
  "tiny-skia",
  "wayland-client",

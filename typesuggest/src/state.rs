@@ -32,6 +32,24 @@ pub enum InputMode {
     },
 }
 
+/// What the user's last key did to the text at the caret. Only keys that change the text bring
+/// the bar up; the text an app reports on its own (on focus, after a click or a scroll) never does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Editing {
+    /// No key has changed the text in this field yet, or the last one moved the caret or closed
+    /// the bar: reports keep the bar hidden
+    #[default]
+    No,
+    /// The last key typed a character or was Backspace, which leave the text after the caret
+    /// as it was
+    BeforeCaret,
+    /// The last key was Delete, which takes text away after the caret
+    AfterCaret,
+}
+
+/// Characters after the caret compared between two reports to tell a keystroke from a caret move
+const AFTER_CARET_MATCH: usize = 32;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyAction {
     /// Pass key directly to application
@@ -77,6 +95,60 @@ pub fn extract_word_prefix(before_cursor: &str) -> &str {
         }
     }
     &before_cursor[start_byte..]
+}
+
+/// Whether the text after the caret in a report starts as it did `skipped` characters past
+/// `prev_cursor` (a byte offset) in the previous one. Apps cut long text to a window around the
+/// caret (Chromium to 4000 bytes), whose far end can move with the caret, so only the start of
+/// the text is compared.
+fn same_text_after_caret(
+    prev_text: &str,
+    prev_cursor: usize,
+    skipped: usize,
+    after_cursor: &str,
+) -> bool {
+    prev_text.get(prev_cursor..).is_some_and(|prev_after| {
+        prev_after
+            .chars()
+            .skip(skipped)
+            .take(AFTER_CARET_MATCH)
+            .eq(after_cursor.chars().take(AFTER_CARET_MATCH))
+    })
+}
+
+/// Whether the text before the caret in a report ends as it did before `prev_cursor` (a byte
+/// offset) in the previous one
+fn same_text_before_caret(prev_text: &str, prev_cursor: usize, before_cursor: &str) -> bool {
+    prev_text.get(..prev_cursor).is_some_and(|prev_before| {
+        prev_before
+            .chars()
+            .rev()
+            .take(AFTER_CARET_MATCH)
+            .eq(before_cursor.chars().rev().take(AFTER_CARET_MATCH))
+    })
+}
+
+/// Whether a report has the caret where the keys pressed since the previous report (`prev_text`
+/// with the caret, or a selection, between `prev_start` and `prev_end`) left it, rather than
+/// somewhere a click put it. Typing and Backspace change only the text before the caret; Delete
+/// only the text after it, a character per press (and per repeat while it is held).
+fn caret_stayed(
+    editing: Editing,
+    prev_text: &str,
+    (prev_start, prev_end): (usize, usize),
+    before_cursor: &str,
+    after_cursor: &str,
+) -> bool {
+    match editing {
+        Editing::No => true,
+        Editing::BeforeCaret => same_text_after_caret(prev_text, prev_end, 0, after_cursor),
+        Editing::AfterCaret => {
+            same_text_before_caret(prev_text, prev_start, before_cursor)
+                && (0..=AFTER_CARET_MATCH).any(|deleted| {
+                    same_text_after_caret(prev_text, prev_end, deleted, after_cursor)
+                })
+        }
+    }
 }
 
 pub fn extract_word_suffix(after_cursor: &str) -> &str {
@@ -429,6 +501,10 @@ pub struct StateMachine {
     /// keystroke back as surrounding text, which would otherwise repeat the same lookup
     /// two or three times.
     last_suggestion: Option<(String, Context, bool, Vec<String>)>,
+    /// What the user's last key did at the caret, which decides whether a report may show the bar
+    pub editing: Editing,
+    /// Text, cursor and anchor of the app's last surrounding text report
+    reported: Option<(String, usize, usize)>,
 }
 
 impl Default for StateMachine {
@@ -448,6 +524,8 @@ impl StateMachine {
             accept_keys: AcceptKeys::default(),
             trailing_space: true,
             last_suggestion: None,
+            editing: Editing::No,
+            reported: None,
         }
     }
 
@@ -459,6 +537,8 @@ impl StateMachine {
         self.accept_keys = config.accept_keys;
         self.trailing_space = config.trailing_space;
         self.invalidate_suggestions();
+        // The next report is looked up again with the new settings, even if the text is the same
+        self.reported = None;
     }
 
     /// Memoized `Dictionary::suggest` for the current prefix and context. A later segment
@@ -516,7 +596,38 @@ impl StateMachine {
     pub fn reset(&mut self) -> KeyAction {
         self.mode = InputMode::Idle;
         self.buffer.clear();
+        self.editing = Editing::No;
+        self.reported = None;
         KeyAction::HideSuggestions
+    }
+
+    /// Close the bar because the user turned away from it (moved the mouse or clicked off it,
+    /// scrolled the caret off the screen). It stays closed until a key changes the text again.
+    pub fn dismiss(&mut self) {
+        self.mode = InputMode::Idle;
+        self.editing = Editing::No;
+    }
+
+    /// The keyboard has been quiet for a while, so the next change the app reports is not one
+    /// the user typed. A bar that is up stays up until such a change arrives.
+    pub fn stop_editing(&mut self) {
+        self.editing = Editing::No;
+    }
+
+    /// The action that keeps the bar as it is: the shown suggestions and highlight, or hidden
+    fn current_action(&self) -> KeyAction {
+        match &self.mode {
+            InputMode::Suggesting {
+                prefix, candidates, ..
+            } => KeyAction::ShowSuggestions {
+                prefix: prefix.clone(),
+                candidates: candidates.clone(),
+            },
+            InputMode::Navigating { selected_index, .. } => KeyAction::UpdateSelection {
+                index: *selected_index,
+            },
+            InputMode::Idle => KeyAction::PassThrough,
+        }
     }
 
     /// Handle text cursor context update from compositor (surrounding text)
@@ -527,9 +638,23 @@ impl StateMachine {
         anchor_bytes: usize,
         dict: &Dictionary,
     ) -> KeyAction {
+        // Hyprland repeats the app's last text with every later update from it, such as the
+        // caret position at each step of a scroll. Nothing changed, so neither does the bar.
+        if self
+            .reported
+            .as_ref()
+            .is_some_and(|(t, c, a)| t == text && *c == cursor_bytes && *a == anchor_bytes)
+        {
+            return self.current_action();
+        }
+        let previous = self
+            .reported
+            .replace((text.to_string(), cursor_bytes, anchor_bytes));
+
         // If text is actively highlighted/selected (cursor != anchor), dismiss suggestions
         if cursor_bytes != anchor_bytes {
             self.buffer.clear();
+            self.editing = Editing::No;
             if self.mode != InputMode::Idle {
                 self.mode = InputMode::Idle;
                 return KeyAction::HideSuggestions;
@@ -545,6 +670,23 @@ impl StateMachine {
         let before_cursor = &text[..cursor_bytes];
         let after_cursor = &text[cursor_bytes..];
 
+        // Keys change the text on one side of the caret only. A report with other text there
+        // has the caret somewhere else now, put there by a click rather than a key.
+        if let Some((prev_text, prev_cursor, prev_anchor)) = &previous
+            && !caret_stayed(
+                self.editing,
+                prev_text,
+                (
+                    (*prev_cursor).min(*prev_anchor),
+                    (*prev_cursor).max(*prev_anchor),
+                ),
+                before_cursor,
+                after_cursor,
+            )
+        {
+            self.editing = Editing::No;
+        }
+
         // Always sync the internal buffer with compositor surrounding text, then read the
         // word at the caret from it exactly as typed keys do, so the segment offered here
         // is the same one a commit replaces
@@ -553,7 +695,8 @@ impl StateMachine {
         let (word_prefix, context) = self.buffer.current_word_context();
         let word_suffix = self.buffer.current_word_suffix();
 
-        if word_prefix.chars().count() >= self.min_prefix_length
+        if self.editing != Editing::No
+            && word_prefix.chars().count() >= self.min_prefix_length
             && word_prefix.chars().any(|c| c.is_alphabetic())
         {
             let candidates = self.suggest(dict, &word_prefix, &context);
@@ -603,8 +746,10 @@ impl StateMachine {
         ctrl_active: bool,
         dict: &Dictionary,
     ) -> KeyAction {
-        // 1. Control key shortcuts (e.g. in bash/terminals/editors)
+        // 1. Control key shortcuts (e.g. in bash/terminals/editors). They close the bar, and
+        // what they do to the text (paste, undo, word deletion) must not bring it back.
         if ctrl_active {
+            self.editing = Editing::No;
             match keysym {
                 KEY_BACKSPACE | 0x0077 /* 'w' */ | 0x0057 /* 'W' */ => {
                     self.buffer.delete_word_backwards();
@@ -707,7 +852,7 @@ impl StateMachine {
 
                 KEY_UP | KEY_DOWN | KEY_ESCAPE => {
                     // The other arrow or Escape cancels navigation back to document and swallows key
-                    self.mode = InputMode::Idle;
+                    self.dismiss();
                     return KeyAction::CancelNavigation;
                 }
 
@@ -719,7 +864,7 @@ impl StateMachine {
                     }
                     // A highlight past the last candidate has nothing to commit; the key is
                     // still swallowed, as an accept key always is while navigating
-                    self.mode = InputMode::Idle;
+                    self.dismiss();
                     return KeyAction::CancelNavigation;
                 }
 
@@ -794,7 +939,8 @@ impl StateMachine {
         };
         self.buffer
             .apply_replacement(prefix.chars().count(), suffix.chars().count(), &replacement);
-        self.mode = InputMode::Idle;
+        // The word is done: the app's report of it must not offer it again
+        self.dismiss();
         Some(KeyAction::CommitCandidate {
             deleted_before: prefix,
             deleted_after: suffix,
@@ -829,7 +975,7 @@ impl StateMachine {
                 // "down" the bar can be showing here, and it must not outlive the word it was for
                 let was_suggesting = self.mode != InputMode::Idle;
                 self.buffer.clear();
-                self.mode = InputMode::Idle;
+                self.dismiss();
                 if was_suggesting {
                     KeyAction::HideSuggestions
                 } else {
@@ -839,43 +985,44 @@ impl StateMachine {
 
             KEY_DOWN => {
                 self.buffer.clear();
-                self.mode = InputMode::Idle;
+                self.dismiss();
                 KeyAction::HideSuggestions
             }
 
             KEY_LEFT => {
                 self.buffer.move_left();
-                self.mode = InputMode::Idle;
+                self.dismiss();
                 KeyAction::HideSuggestions
             }
 
             KEY_RIGHT => {
                 self.buffer.move_right();
-                self.mode = InputMode::Idle;
+                self.dismiss();
                 KeyAction::HideSuggestions
             }
 
             KEY_HOME => {
                 self.buffer.move_home();
-                self.mode = InputMode::Idle;
+                self.dismiss();
                 KeyAction::HideSuggestions
             }
 
             KEY_END => {
                 self.buffer.move_end();
-                self.mode = InputMode::Idle;
+                self.dismiss();
                 KeyAction::HideSuggestions
             }
 
             KEY_ESCAPE => {
                 self.buffer.clear();
-                self.mode = InputMode::Idle;
+                self.dismiss();
                 KeyAction::HideSuggestions
             }
 
             KEY_SPACE => {
                 // Normal space typed in document is inserted into buffer so deleting back into previous word works!
                 self.buffer.insert_char(' ');
+                self.editing = Editing::BeforeCaret;
                 self.mode = InputMode::Idle;
                 KeyAction::HideSuggestions
             }
@@ -885,7 +1032,7 @@ impl StateMachine {
                 let is_sensitive = is_sensitive_command_line(&line);
                 let was_suggesting = self.mode != InputMode::Idle;
                 self.buffer.clear();
-                self.mode = InputMode::Idle;
+                self.dismiss();
                 if is_sensitive {
                     KeyAction::SensitiveCommandSubmitted
                 } else if was_suggesting {
@@ -896,6 +1043,9 @@ impl StateMachine {
             }
 
             KEY_BACKSPACE => {
+                // An edit even when the buffer has nothing to delete (cleared by Escape, say):
+                // the app's report of what it deleted then brings up the word at the caret
+                self.editing = Editing::BeforeCaret;
                 let had_char = self.buffer.backspace();
                 if had_char {
                     let (prefix, context) = self.buffer.current_word_context();
@@ -919,6 +1069,7 @@ impl StateMachine {
             }
 
             KEY_DELETE => {
+                self.editing = Editing::AfterCaret;
                 self.buffer.delete();
                 let (prefix, context) = self.buffer.current_word_context();
                 let suffix = self.buffer.current_word_suffix();
@@ -942,6 +1093,7 @@ impl StateMachine {
             _ => {
                 if let Some(c) = ch {
                     self.buffer.insert_char(c);
+                    self.editing = Editing::BeforeCaret;
                     if is_word_char(c) {
                         let (prefix, context) = self.buffer.current_word_context();
                         let suffix = self.buffer.current_word_suffix();
@@ -1576,6 +1728,8 @@ mod tests {
     fn test_apply_config_keeps_buffer_and_refreshes_suggestions() {
         let dict = setup_dict();
         let mut sm = StateMachine::new(3);
+        sm.handle_key_press('p' as u32, Some('p'), false, &dict);
+        sm.handle_key_press('r' as u32, Some('r'), false, &dict);
         let act = sm.handle_surrounding_text("pr", 2, 2, &dict);
         assert!(
             matches!(act, KeyAction::ShowSuggestions { ref candidates, .. } if candidates.len() == 3)
@@ -1809,11 +1963,18 @@ mod tests {
         let dict = setup_dict();
         let mut sm = StateMachine::new(3);
 
-        // Document has "I was beginning to see"
-        // Caret is after 'beg' (index 9)
+        // Document has "I was begginning to see", and a click put the caret after "begg"
+        // (index 10). Placing the caret shows nothing yet.
+        let text = "I was begginning to see";
+        let act = sm.handle_surrounding_text(text, 10, 10, &dict);
+        assert_eq!(act, KeyAction::PassThrough);
+        assert_eq!(sm.mode, InputMode::Idle);
+
+        // Backspace edits the word at the caret, which the app then reports
+        let act = sm.handle_key_press(KEY_BACKSPACE, None, false, &dict);
+        assert!(matches!(act, KeyAction::ShowSuggestions { .. }));
         let text = "I was beginning to see";
         let act = sm.handle_surrounding_text(text, 9, 9, &dict);
-
         assert!(matches!(act, KeyAction::ShowSuggestions { .. }));
         if let InputMode::Suggesting { prefix, suffix, .. } = &sm.mode {
             assert_eq!(prefix, "beg");
@@ -1850,6 +2011,273 @@ mod tests {
         let act = sm.handle_surrounding_text(text, 10, 15, &dict);
         assert_eq!(act, KeyAction::PassThrough);
         assert_eq!(sm.mode, InputMode::Idle);
+    }
+
+    /// Report `text` with the caret at byte `cursor` and nothing selected
+    fn report(sm: &mut StateMachine, dict: &Dictionary, text: &str, cursor: usize) -> KeyAction {
+        sm.handle_surrounding_text(text, cursor, cursor, dict)
+    }
+
+    /// Type `typed` at the end of `text`, reporting the text after each key as GUI apps do
+    fn type_with_reports(sm: &mut StateMachine, dict: &Dictionary, text: &str, typed: &str) {
+        let mut text = text.to_string();
+        for c in typed.chars() {
+            sm.handle_key_press(c as u32, Some(c), false, dict);
+            text.push(c);
+            report(sm, dict, &text, text.len());
+        }
+    }
+
+    #[test]
+    fn test_focusing_a_field_shows_nothing_until_typing() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        // The field opens with the caret right after a word the bar could complete
+        let act = report(&mut sm, &dict, "a pro", 5);
+        assert_eq!(act, KeyAction::PassThrough);
+        assert_eq!(sm.mode, InputMode::Idle);
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "a pro");
+
+        // The first letter typed brings it up, for the whole word
+        let act = sm.handle_key_press('g' as u32, Some('g'), false, &dict);
+        assert!(
+            matches!(&act, KeyAction::ShowSuggestions { prefix, .. } if prefix == "prog"),
+            "{act:?}"
+        );
+        let act = report(&mut sm, &dict, "a prog", 6);
+        assert!(matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+    }
+
+    #[test]
+    fn test_keys_that_do_not_edit_never_bring_the_bar_back() {
+        let dict = setup_dict();
+        // Each moves the caret or acts on the text without typing into it; the app's report
+        // afterwards must leave the bar hidden
+        for (keysym, ctrl, text, cursor) in [
+            (KEY_LEFT, false, "a program", 8),
+            (KEY_RIGHT, false, "a program x", 10),
+            (KEY_HOME, false, "a program", 0),
+            (KEY_END, false, "a program x", 11),
+            (KEY_UP, false, "pro\na program", 3),
+            (KEY_DOWN, false, "a program\npro", 13),
+            (KEY_ESCAPE, false, "a program", 9),
+            // Paste
+            (0x0076, true, "a program pro", 13),
+            // Undo
+            (0x007a, true, "a pro", 5),
+        ] {
+            let mut sm = StateMachine::new(3);
+            type_with_reports(&mut sm, &dict, "a ", "program");
+            sm.handle_key_press(keysym, None, ctrl, &dict);
+            let act = report(&mut sm, &dict, text, cursor);
+            assert!(
+                matches!(act, KeyAction::PassThrough | KeyAction::HideSuggestions),
+                "{keysym:#x} gave {act:?}"
+            );
+            assert_eq!(sm.mode, InputMode::Idle, "{keysym:#x}");
+        }
+    }
+
+    #[test]
+    fn test_repeated_report_leaves_the_bar_as_it_is() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        // A scroll makes the app send its caret position again, and Hyprland repeats the
+        // unchanged text with it
+        type_with_reports(&mut sm, &dict, "", "pr");
+        let shown = sm.mode.clone();
+        for _ in 0..3 {
+            let act = report(&mut sm, &dict, "pr", 2);
+            assert!(matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+            assert_eq!(sm.mode, shown);
+        }
+
+        // Navigation and its highlight survive it too
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        sm.handle_key_press(KEY_RIGHT, None, false, &dict);
+        assert_eq!(
+            report(&mut sm, &dict, "pr", 2),
+            KeyAction::UpdateSelection { index: 1 }
+        );
+
+        // Once closed, the bar stays closed
+        sm.handle_key_press(KEY_DOWN, None, false, &dict);
+        assert_eq!(report(&mut sm, &dict, "pr", 2), KeyAction::PassThrough);
+        assert_eq!(sm.mode, InputMode::Idle);
+    }
+
+    #[test]
+    fn test_clicking_elsewhere_hides_the_bar() {
+        let dict = setup_dict();
+        // The caret moves in the same text, or to text after it that differs (apps cut long
+        // text to a window around the caret, so the whole text cannot be compared)
+        for (text, cursor) in [
+            ("a pr", 1),
+            ("a pr", 3),
+            ("help a pr", 4),
+            ("x\nhelp more", 6),
+        ] {
+            let mut sm = StateMachine::new(3);
+            type_with_reports(&mut sm, &dict, "a ", "pr");
+            assert!(matches!(sm.mode, InputMode::Suggesting { .. }));
+            let act = report(&mut sm, &dict, text, cursor);
+            assert_eq!(act, KeyAction::HideSuggestions, "{text:?} at {cursor}");
+            assert_eq!(sm.editing, Editing::No);
+            // The app reporting it again does not bring the bar back
+            report(&mut sm, &dict, text, cursor);
+            assert_eq!(sm.mode, InputMode::Idle);
+        }
+    }
+
+    #[test]
+    fn test_typing_in_long_text_keeps_the_bar() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        // Chromium cuts text over 4000 bytes to a window centred on the caret, here shrunk to
+        // 100 characters each side. Typing slides the part before the caret along; the part
+        // after it stays the same.
+        let after = " and then some more words follow the caret in this long field".repeat(3);
+        let window = |before: &str| {
+            let tail: String = before
+                .chars()
+                .rev()
+                .take(100)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let head: String = after.chars().take(100).collect();
+            (format!("{tail}{head}"), tail.len())
+        };
+        let mut before = "lead ".repeat(30);
+        let (text, cursor) = window(&before);
+        report(&mut sm, &dict, &text, cursor);
+        for c in "pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+            before.push(c);
+            let (text, cursor) = window(&before);
+            let act = report(&mut sm, &dict, &text, cursor);
+            assert!(matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+        }
+    }
+
+    #[test]
+    fn test_going_back_to_a_word_and_editing_it() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        // Typed on to the next sentence, then clicked back after "pro"
+        type_with_reports(&mut sm, &dict, "a pro. ", "he");
+        assert!(matches!(sm.mode, InputMode::Suggesting { .. }));
+        assert_eq!(
+            report(&mut sm, &dict, "a pro. he", 5),
+            KeyAction::HideSuggestions
+        );
+
+        // Editing that word offers completions of it, from the text the app reported
+        let act = sm.handle_key_press('g' as u32, Some('g'), false, &dict);
+        assert!(
+            matches!(&act, KeyAction::ShowSuggestions { prefix, .. } if prefix == "prog"),
+            "{act:?}"
+        );
+        let act = report(&mut sm, &dict, "a prog. he", 6);
+        assert!(matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+        sm.handle_key_press(KEY_BACKSPACE, None, false, &dict);
+        let act = report(&mut sm, &dict, "a pro. he", 5);
+        assert!(
+            matches!(&act, KeyAction::ShowSuggestions { candidates, .. } if candidates[0] == "program"),
+            "{act:?}"
+        );
+
+        // Backspace after Escape (which forgets the buffer) still finds the word once the
+        // app reports what it deleted
+        sm.handle_key_press(KEY_ESCAPE, None, false, &dict);
+        let act = sm.handle_key_press(KEY_BACKSPACE, None, false, &dict);
+        assert_eq!(act, KeyAction::HideSuggestions);
+        let act = report(&mut sm, &dict, "a pr. he", 4);
+        assert!(
+            matches!(&act, KeyAction::ShowSuggestions { prefix, .. } if prefix == "pr"),
+            "{act:?}"
+        );
+    }
+
+    #[test]
+    fn test_delete_key_keeps_the_bar_while_the_text_after_changes() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        report(&mut sm, &dict, "prxogram", 2);
+        let act = sm.handle_key_press(KEY_DELETE, None, false, &dict);
+        assert!(matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+        let act = report(&mut sm, &dict, "program", 2);
+        assert!(matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+
+        // Delete held down: the app reports several characters gone at once
+        sm.handle_key_press(KEY_DELETE, None, false, &dict);
+        let act = report(&mut sm, &dict, "pram", 2);
+        assert!(matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+
+        // A click right after Delete moves the caret, which changes the text before it
+        sm.handle_key_press(KEY_DELETE, None, false, &dict);
+        assert_eq!(
+            report(&mut sm, &dict, "pram", 3),
+            KeyAction::HideSuggestions
+        );
+    }
+
+    #[test]
+    fn test_typing_over_a_selection_keeps_the_bar() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        // "word" selected, caret at its start, then "p" typed over it
+        report(&mut sm, &dict, "a word here", 2);
+        report(&mut sm, &dict, "a word here", 2);
+        sm.handle_surrounding_text("a word here", 2, 6, &dict);
+        sm.handle_key_press('p' as u32, Some('p'), false, &dict);
+        let act = report(&mut sm, &dict, "a p here", 3);
+        assert!(matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+    }
+
+    #[test]
+    fn test_committed_word_is_not_offered_again() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        sm.trailing_space = false;
+        type_with_reports(&mut sm, &dict, "", "pro");
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        let act = sm.handle_key_press(KEY_RETURN, None, false, &dict);
+        assert!(matches!(act, KeyAction::CommitCandidate { .. }), "{act:?}");
+        // The app reports the word with the caret right after it
+        assert_eq!(report(&mut sm, &dict, "program", 7), KeyAction::PassThrough);
+        assert_eq!(sm.mode, InputMode::Idle);
+    }
+
+    #[test]
+    fn test_quiet_keyboard_stops_reports_from_changing_the_bar() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        type_with_reports(&mut sm, &dict, "a ", "pr");
+        sm.stop_editing();
+        // A repeat of the same text (a scroll) keeps the bar up
+        assert!(matches!(
+            report(&mut sm, &dict, "a pr", 4),
+            KeyAction::ShowSuggestions { .. }
+        ));
+        // A change the user did not type hides it, even with the text after the caret the same
+        assert_eq!(
+            report(&mut sm, &dict, "help a pr", 9),
+            KeyAction::HideSuggestions
+        );
+    }
+
+    #[test]
+    fn test_dismissed_bar_waits_for_the_next_key() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        type_with_reports(&mut sm, &dict, "", "pr");
+        sm.dismiss();
+        // The app's late report of the last key does not bring it back
+        assert_eq!(report(&mut sm, &dict, "pro", 3), KeyAction::PassThrough);
+        let act = sm.handle_key_press('g' as u32, Some('g'), false, &dict);
+        assert!(matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
     }
 
     #[test]
