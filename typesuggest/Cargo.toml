@@ -1,6 +1,6 @@
 [package]
 name = "typesuggest"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2024"
 authors = ["Abdulrahman Rahmouni <AbdulrahmanHR@users.noreply.github.com>"]
 description = "Native Windows-style hardware keyboard text suggestions for Linux on Wayland"
