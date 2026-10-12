@@ -579,18 +579,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  - Font: {}", config.font);
     }
 
-    // 4. Load English frequency dictionary (50,000 words embedded)
+    // 4. Load the embedded English vocabulary, n-gram language model and names
     let start_time = std::time::Instant::now();
-    let embedded_freq = include_str!("../data/en_50k.txt");
-    let mut dict = Dictionary::from_frequency_text(embedded_freq);
-
-    // 4b. Load English contextual n-gram models (bigrams and trigrams embedded)
-    let embedded_bigrams = include_str!("../data/bigrams.tsv");
-    dict.load_bigrams_tsv(embedded_bigrams);
-    let embedded_trigrams = include_str!("../data/trigrams.tsv");
-    dict.load_trigrams_tsv(embedded_trigrams);
-    // The embedded data splits contractions ("don" + "'t"); restore them
-    dict.add_english_contractions();
+    let mut dict = Dictionary::embedded();
 
     // 5. Load user custom words from ~/.config/typesuggest/words.txt if it exists
     let user_words_path = app_config_dir.join("words.txt");
@@ -606,6 +597,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 && trimmed.chars().all(|c| c.is_alphabetic() || c == '\'')
             {
                 dict.insert(&trimmed.to_lowercase(), 50_000_000); // High frequency for custom words
+                // A name listed with capitals is suggested with them
+                dict.set_spelling(trimmed);
                 user_word_count += 1;
             }
         }

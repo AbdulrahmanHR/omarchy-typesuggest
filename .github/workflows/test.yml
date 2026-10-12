@@ -1,0 +1,25 @@
+# Runs scripts/test.sh on every push and pull request, in forks too, so a change is
+# checked the way a release is before anyone installs it.
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Arch, the base of Omarchy, as in the Release workflow
+    container: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm --needed rust libxkbcommon ttf-liberation python git
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test
+        run: scripts/test.sh

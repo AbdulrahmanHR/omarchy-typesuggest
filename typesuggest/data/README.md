@@ -8,6 +8,7 @@ folder, which are also built into the `typesuggest` binary, keep their own licen
 | `en_50k.txt` | The 50,000 most frequent English words with counts | [FrequencyWords](https://github.com/hermitdave/FrequencyWords) by Hermit Dave, `content/2018/en/en_50k.txt`, built from [OpenSubtitles](https://www.opensubtitles.org) 2018 | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) |
 | `bigrams.tsv` | About 320,000 word pairs with counts | Built by [`build_bigrams.py`](build_bigrams.py) from the English sentences written by [Tatoeba](https://tatoeba.org) contributors (export of 2026-09-26) | [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/) |
 | `trigrams.tsv` | About 319,000 word triples with counts | Built by [`build_trigrams.py`](build_trigrams.py) from the same Tatoeba export | [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/) |
+| `proper_nouns.txt` | About 15,000 names, places, languages and acronyms as they are written (John, London, English, FBI, iPhone) | Built by [`build_proper_nouns.py`](build_proper_nouns.py) from the en_US Hunspell dictionary of [SCOWL](https://wordlist.aspell.net) (2026.02.25) | SCOWL license, below |
 
 ## Changes
 
@@ -28,6 +29,26 @@ folder, which are also built into the `typesuggest` binary, keep their own licen
   [`build_trigrams.py`](build_trigrams.py) reproduces it exactly, and shares its tokenizing
   with `build_bigrams.py` so the two tables cannot drift apart.
 
+- `proper_nouns.txt` keeps the dictionary's capitalized words, with their plurals (Arabs) but
+  not their possessives, whose lowercase spelling the dictionary rejects, so a name that is
+  also a common word (Mark and mark, May and may) is left out. A short list of names whose
+  lowercase sense is rare (John and john, English and english) is kept regardless, and
+  two-letter entries, mostly chemical symbols and state codes, are left out except for a
+  few common ones (OK, TV, Mr, Dr).
+
+### SCOWL license
+
+```text
+Copyright 2000-2026 by Kevin Atkinson
+
+Permission to use, copy, modify, distribute, and sell any part of SCOWLv2, or
+word lists created from it, is hereby granted without fee, provided that the
+above copyright notice appears in all copies and that both the above
+copyright notice and this notice appear in supporting documentation.  Kevin
+Atkinson makes no representations about the suitability of this database for
+any purpose.  It is provided "as is" without express or implied warranty.
+```
+
 ## Tools
 
 The scripts write their table to standard output:
@@ -35,6 +56,7 @@ The scripts write their table to standard output:
 ```bash
 python3 build_bigrams.py  eng_sentences.tsv.bz2 en_50k.txt > bigrams.tsv
 python3 build_trigrams.py eng_sentences.tsv.bz2 en_50k.txt > trigrams.tsv
+python3 build_proper_nouns.py /usr/share/hunspell/en_US.dic > proper_nouns.txt   # needs hunspell
 ```
 
 `make_eval_data.py` measures a change to ranking honestly: it splits Tatoeba's sentences

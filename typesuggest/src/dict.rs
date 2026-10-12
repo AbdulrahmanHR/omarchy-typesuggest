@@ -58,6 +58,12 @@ pub struct Dictionary {
     trigram_totals: HashMap<(String, String), u32>,
     // User dynamically learned bigrams: preceding_word -> list of (follower_word, frequency)
     user_bigrams: HashMap<String, Vec<(String, u32)>>,
+    // How a word is written when it is not all lowercase: names, places and the like ("london" ->
+    // "London", "fbi" -> "FBI", "iphone" -> "iPhone"), keyed by the lowercase word
+    spellings: HashMap<String, String>,
+    // Words known only from the list of names, which are never learned: a name the frequency list
+    // did not have says more about the user than about English
+    names_only: HashSet<String>,
     learn_enabled: bool,
     // Fall back to similar words (typo correction) when no word starts with the prefix
     typo_correction: bool,
@@ -108,11 +114,18 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
 /// screen: "prog" gives "program", "Prog" gives "Program" and "PROG" gives "PROGRAM".
 /// Capitals inside the prefix are not copied letter by letter, so a held Shift ("THe")
 /// or a typo correction is offered as a word ("They", not "THey"); identifiers get their
-/// inner capitals from completing one segment at a time instead.
-fn match_case(typed: &str, word: &str) -> String {
-    // An all-capitals prefix means the whole word is an acronym or a constant
-    if typed.chars().nth(1).is_some() && typed.chars().all(|c| c.is_uppercase()) {
+/// inner capitals from completing one segment at a time instead. A word with a spelling of its
+/// own (a name, "London", or an acronym, "FBI") is written that way however it was typed.
+fn match_case(typed: &str, word: &str, spelling: Option<&str>) -> String {
+    // An all-capitals prefix means the whole word is an acronym or a constant ("DON'" too)
+    let mut letters = typed.chars().filter(|c| c.is_alphabetic());
+    if typed.chars().filter(|c| c.is_alphabetic()).nth(1).is_some()
+        && letters.all(|c| c.is_uppercase())
+    {
         return word.to_uppercase();
+    }
+    if let Some(spelling) = spelling {
+        return spelling.to_string();
     }
     // A leading capital starts a sentence or a name; "I" and its contractions are the
     // pronoun however they were typed
@@ -132,6 +145,10 @@ fn match_case(typed: &str, word: &str) -> String {
 fn sort_followers(followers: &mut [(String, u32)]) {
     followers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 }
+
+/// Frequency given to a name the frequency list does not have, below that list's rarest word, so
+/// such a name is offered once the prefix leaves few other words, never in place of a common one
+const NAME_FREQUENCY: u64 = 100;
 
 /// How many of the most frequent words for a prefix join the candidate pool.
 /// All of them are scored, so this is headroom for the context tables to promote
@@ -156,6 +173,8 @@ impl Dictionary {
             trigrams: HashMap::new(),
             trigram_totals: HashMap::new(),
             user_bigrams: HashMap::new(),
+            spellings: HashMap::new(),
+            names_only: HashSet::new(),
             learn_enabled: true,
             typo_correction: true,
             ranking: Ranking::default(),
@@ -177,6 +196,58 @@ impl Dictionary {
 
     pub fn set_typo_correction(&mut self, enabled: bool) {
         self.typo_correction = enabled;
+    }
+
+    /// Load names and other words always written with capitals, one per line as they are
+    /// written ("London", "FBI", "iPhone"). Words the vocabulary lacks join it as rare words.
+    pub fn load_proper_nouns(&mut self, text: &str) {
+        for line in text.lines() {
+            let spelling = line.trim();
+            let lower = spelling.to_lowercase();
+            if lower == spelling || !is_dictionary_word(&lower) {
+                continue;
+            }
+            if !self.is_known_word(&lower) {
+                self.insert(&lower, NAME_FREQUENCY);
+                self.names_only.insert(lower.clone());
+            }
+            self.spellings.insert(lower, spelling.to_string());
+        }
+        self.rebuild_caches();
+    }
+
+    /// Write `word` the way it is given from now on when it has capitals ("Abdulrahman",
+    /// "GraphQL"); a word given in lowercase keeps the spelling it has
+    pub fn set_spelling(&mut self, word: &str) {
+        let lower = word.to_lowercase();
+        if lower != word {
+            self.spellings.insert(lower, word.to_string());
+        }
+    }
+
+    /// How `word` (lowercase) is written when that is not in lowercase, the possessive of a
+    /// name included ("london's" -> "London's")
+    fn spelling_of(&self, word: &str) -> Option<String> {
+        if let Some(spelling) = self.spellings.get(word) {
+            return Some(spelling.clone());
+        }
+        let base = word.strip_suffix("'s")?;
+        self.spellings
+            .get(base)
+            .map(|spelling| format!("{spelling}'s"))
+    }
+
+    /// The vocabulary and language model built into the binary: the 50,000 most frequent
+    /// words, the bigram and trigram tables, English contractions and the list of names
+    pub fn embedded() -> Self {
+        let mut dict = Self::from_frequency_text(include_str!("../data/en_50k.txt"));
+        dict.load_bigrams_tsv(include_str!("../data/bigrams.tsv"));
+        dict.load_trigrams_tsv(include_str!("../data/trigrams.tsv"));
+        // The embedded data splits contractions ("don" + "'t"); restore them
+        dict.add_english_contractions();
+        // Names, places and acronyms are suggested with their capitals ("London", "FBI")
+        dict.load_proper_nouns(include_str!("../data/proper_nouns.txt"));
+        dict
     }
 
     /// Load from embedded frequency text: each line is "word frequency"
@@ -298,7 +369,12 @@ impl Dictionary {
         let p = prev_word.trim().to_lowercase();
         let c = chosen_word.trim().to_lowercase();
         // Only pairs of known words: names, codes and passphrase words are never remembered
-        if p == c || !self.is_known_word(&p) || !self.is_known_word(&c) {
+        if p == c
+            || !self.is_known_word(&p)
+            || !self.is_known_word(&c)
+            || self.names_only.contains(&p)
+            || self.names_only.contains(&c)
+        {
             return;
         }
 
@@ -590,15 +666,16 @@ impl Dictionary {
         self.suggest_with(prefix, ctx, limit, true)
     }
 
-    /// [`Dictionary::suggest`], with the typo fallback for a prefix no word starts with
-    /// left out when `typo_fallback` is false (it also stays out while typo correction
-    /// is turned off)
+    /// [`Dictionary::suggest`] for a word (`whole_word` true) or for a later segment of an
+    /// identifier ("Prog" in "myProg", "john" in "get_john"). A segment gets no typo fallback
+    /// for a prefix no word starts with (the fallback also stays out while typo correction is
+    /// turned off), and is never spelled as a name: its case is the identifier's.
     pub fn suggest_with(
         &self,
         prefix: &str,
         ctx: &Context,
         limit: usize,
-        typo_fallback: bool,
+        whole_word: bool,
     ) -> Vec<String> {
         if prefix.is_empty() {
             return Vec::new();
@@ -648,10 +725,22 @@ impl Dictionary {
             evidence.entry(cand.clone()).or_default();
         }
 
-        // 3. Score them all together and keep the best
+        // 3. Score them all together and keep the best. The word already typed is no
+        //    suggestion, unless it is a name typed without its capitals ("london")
+        let spelling = |word: &str| {
+            if whole_word {
+                self.spelling_of(word)
+            } else {
+                None
+            }
+        };
         let mut ranked: Vec<(f64, &String)> = evidence
             .iter()
-            .filter(|(word, _)| *word != &lower_prefix)
+            .filter(|(word, _)| {
+                *word != &lower_prefix
+                    || spelling(word)
+                        .is_some_and(|written| match_case(prefix, word, Some(&written)) != prefix)
+            })
             .map(|(word, ev)| (self.score(word, &lower_prefix, ctx, *ev), word))
             .collect();
         // Ties fall back to the words themselves, so the bar never reorders itself
@@ -667,7 +756,7 @@ impl Dictionary {
         // 4. If exact prefix matching yielded NO candidates, fall back to similarity search!
         //    The vocabulary is English, so only queries containing Latin letters can be near a word
         if self.typo_correction
-            && typo_fallback
+            && whole_word
             && results.is_empty()
             && lower_prefix.len() >= 2
             && lower_prefix.chars().any(|c| c.is_ascii_alphabetic())
@@ -686,7 +775,7 @@ impl Dictionary {
         results
             .into_iter()
             .take(limit)
-            .map(|cand| match_case(prefix, &cand))
+            .map(|cand| match_case(prefix, &cand, spelling(&cand).as_deref()))
             .collect()
     }
 
@@ -1144,16 +1233,91 @@ mod tests {
 
     #[test]
     fn test_case_of_the_completion_follows_the_typed_segment() {
-        assert_eq!(match_case("prog", "program"), "program");
-        assert_eq!(match_case("Prog", "program"), "Program");
-        assert_eq!(match_case("PROG", "program"), "PROGRAM");
+        assert_eq!(match_case("prog", "program", None), "program");
+        assert_eq!(match_case("Prog", "program", None), "Program");
+        assert_eq!(match_case("PROG", "program", None), "PROGRAM");
         // Inner capitals are a held Shift or an identifier's segment, never copied
-        assert_eq!(match_case("THe", "they"), "They");
-        assert_eq!(match_case("proG", "program"), "program");
+        assert_eq!(match_case("THe", "they", None), "They");
+        assert_eq!(match_case("proG", "program", None), "program");
         // One capital letter is a capitalized word, not an acronym
-        assert_eq!(match_case("É", "émile"), "Émile");
-        assert_eq!(match_case("i", "i"), "I");
-        assert_eq!(match_case("i", "i'm"), "I'm");
+        assert_eq!(match_case("É", "émile", None), "Émile");
+        assert_eq!(match_case("i", "i", None), "I");
+        assert_eq!(match_case("i", "i'm", None), "I'm");
+        // Apostrophes are not letters: an all-capitals contraction stays in capitals
+        assert_eq!(match_case("DON'", "don't", None), "DON'T");
+        assert_eq!(match_case("I'", "i'm", None), "I'm");
+    }
+
+    #[test]
+    fn test_names_are_suggested_with_their_capitals() {
+        let text = "london 900\nlook 800\nlot 700\nok 600\noften 500";
+        let mut dict = Dictionary::from_frequency_text(text);
+        dict.load_proper_nouns("London\nOK\nAhmed\niPhone\n");
+        let ctx = Context::default();
+
+        // A name is written with its capitals however it was typed
+        assert_eq!(dict.suggest("lo", &ctx, 3), vec!["London", "look", "lot"]);
+        assert_eq!(dict.suggest("Lo", &ctx, 3), vec!["London", "Look", "Lot"]);
+        assert_eq!(dict.suggest("LO", &ctx, 3), vec!["LONDON", "LOOK", "LOT"]);
+        assert_eq!(dict.suggest("o", &ctx, 2), vec!["OK", "often"]);
+        // Names the frequency list lacks are known too, after its own words
+        assert_eq!(dict.suggest("ah", &ctx, 3), vec!["Ahmed"]);
+        assert_eq!(dict.suggest("iph", &ctx, 3), vec!["iPhone"]);
+        assert_eq!(dict.suggest("Iph", &ctx, 3), vec!["iPhone"]);
+        assert!(dict.is_known_word("ahmed"));
+    }
+
+    #[test]
+    fn test_a_name_typed_in_lowercase_is_offered_capitalized() {
+        let mut dict = Dictionary::from_frequency_text("london 900\nlondoner 100");
+        dict.load_proper_nouns("London\n");
+        let ctx = Context::default();
+        assert_eq!(dict.suggest("london", &ctx, 3), vec!["London", "londoner"]);
+        // Typed as it is written, the word itself is no suggestion
+        assert_eq!(dict.suggest("London", &ctx, 3), vec!["Londoner"]);
+        assert_eq!(dict.suggest("LONDON", &ctx, 3), vec!["LONDONER"]);
+    }
+
+    #[test]
+    fn test_identifier_segments_keep_their_own_case() {
+        let mut dict = Dictionary::from_frequency_text("london 900");
+        dict.load_proper_nouns("London\n");
+        // "get_lo": the identifier decides the case, not the name
+        assert_eq!(
+            dict.suggest_with("lo", &Context::default(), 3, false),
+            vec!["london"]
+        );
+    }
+
+    #[test]
+    fn test_possessive_of_a_name_and_user_spellings() {
+        let mut dict = Dictionary::from_frequency_text("london's 500\nmark 400\nabdulrahman 300");
+        dict.load_proper_nouns("London\n");
+        assert_eq!(
+            dict.suggest("lond", &Context::default(), 1),
+            vec!["London's"]
+        );
+        // A word list entry with capitals decides how a word is written; one in lowercase
+        // leaves a name's capitals alone
+        dict.set_spelling("Abdulrahman");
+        assert_eq!(
+            dict.suggest("abd", &Context::default(), 1),
+            vec!["Abdulrahman"]
+        );
+        dict.set_spelling("london");
+        assert_eq!(
+            dict.suggest("lond", &Context::default(), 1),
+            vec!["London's"]
+        );
+    }
+
+    #[test]
+    fn test_names_only_known_from_the_name_list_are_not_learned() {
+        let mut dict = Dictionary::from_frequency_text("my 1000\nfriend 500\njohn 400");
+        dict.load_proper_nouns("John\nAhmed\n");
+        dict.record_user_bigram("friend", "ahmed");
+        dict.record_user_bigram("friend", "john");
+        assert_eq!(dict.user_bigrams_tsv(), "friend\tjohn\t1\n");
     }
 
     #[test]

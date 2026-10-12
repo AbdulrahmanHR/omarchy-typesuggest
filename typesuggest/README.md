@@ -20,12 +20,13 @@ A blazing fast, native **Windows-style hardware keyboard text suggestion tool** 
 - **Contextual Trigram Language Model & Dynamic Phrase Learning:**
   - Embedded 320,000 contextual word pairs (`bigrams.tsv`) and 319,000 word triples (`trigrams.tsv`) to intelligently bias predictions based on sentence context (e.g. typing "m" after "good" suggests "morning" rather than "much", and after "as soon" it gets closer still).
   - Suggestions are scored by interpolating the three orders of word evidence — the word's own frequency, what follows the previous word, and what follows the previous two words — so a phrase can override a word that is simply more common elsewhere.
-  - Learns which word you pick after which, saved to `~/.config/typesuggest/user_bigrams.tsv` (only pairs of dictionary words, so names, codes and passphrases are never stored).
+  - Learns which word you pick after which, saved to `~/.config/typesuggest/user_bigrams.tsv` (only pairs of words from the 50,000-word list, so codes, passphrases and names only the name list knows are never stored).
   - Can be toggled on/off on the fly via `--learn`/`--no-learn` or in configuration.
 - **Microsecond Prefix Matching:**
   - High-performance in-memory Trie with top 50,000 common English words ranked by frequency.
   - Typical lookup latency, context scoring included: **~0.02 ms** (about 20 microseconds).
   - Preserves user capitalization (e.g. `prog` -> `program`, `Prog` -> `Program`, `PROG` -> `PROGRAM`).
+  - Knows about 15,000 names, places, languages and acronyms and writes them properly however you type them (`lon` -> `London`, `eng` -> `English`, `fb` -> `FBI`, `iph` -> `iPhone`); a name typed in full in lowercase (`london`) is offered capitalized.
 - **Identifier-Aware Completion:**
   - Completes only the segment you are typing inside `snake_case`, `kebab-case`, and `camelCase` names, leaving the rest of the identifier untouched (`myProg` -> `myProgram`, `get_prog` -> `get_program`, `HTTPServ` -> `HTTPService`).
 - **Bidirectional Retro-Editing & Cross-Word Navigation:**
@@ -295,16 +296,30 @@ TypeSuggest is an input method, so **every key you press passes through it** bef
 
 ## 📖 Custom Vocabulary
 
-Add your own custom words, names, or technical terms in `~/.config/typesuggest/words.txt` (one per line). They are automatically given top suggestion priority on startup.
+Add your own custom words, names, or technical terms in `~/.config/typesuggest/words.txt` (one per line). They are automatically given top suggestion priority on startup. Write a word with its capitals (`Hyprland`, `GraphQL`) to have it suggested that way however you type it.
 
 Example:
 ```text
 # ~/.config/typesuggest/words.txt
-omarchy
-hyprland
+Omarchy
+Hyprland
 kubernetes
-wayland
+Wayland
 ```
+
+---
+
+## 🧪 Testing
+
+```bash
+../scripts/test.sh               # everything a release is checked with
+cargo test --test behaviour      # end-to-end behaviour with the built-in dictionary
+cargo run --release --example bench   # load time and lookup latency
+```
+
+[`tests/behaviour.rs`](tests/behaviour.rs) drives the state machine the way the daemon does,
+as a terminal (keys only) and as a GUI field (keys plus the app's text reports), so no Wayland
+session is needed.
 
 ---
 

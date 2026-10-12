@@ -5,7 +5,7 @@ use crate::security::{
     is_sensitive_window,
 };
 use crate::shm::{BUFFER_SCALE, draw_pixmap_to_surface, hide_surface};
-use crate::state::{InputMode, KeyAction, StateMachine};
+use crate::state::{InputMode, KeyAction, StateMachine, is_modifier_keysym};
 use crate::theme::{OmarchyTheme, Palette, Theme};
 use crate::ui::{PillRect, Renderer};
 use std::os::fd::AsFd;
@@ -175,9 +175,9 @@ pub fn repeats_while_held(rate: i32, delay: i32, held_ms: u32) -> u64 {
     1 + (held_ms - delay) * rate / 1000
 }
 
-/// Modifier keys, which apps never repeat
-fn is_modifier_keysym(keysym: u32) -> bool {
-    (0xffe1..=0xffee).contains(&keysym) || (0xfe01..=0xfe0f).contains(&keysym) || keysym == 0xff7e
+/// Keys that move the caret, main block and keypad: with Shift held they select text instead
+fn is_caret_keysym(keysym: u32) -> bool {
+    (0xff50..=0xff57).contains(&keysym) || (0xff95..=0xff9c).contains(&keysym)
 }
 
 pub struct Engine {
@@ -1477,6 +1477,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                     let mut char_opt = None;
                     let mut ctrl_active = false;
                     let mut alt_or_super = false;
+                    let mut shift_active = false;
 
                     if let Some(xkb_state) = &state.xkb_state {
                         let keycode = xkb::Keycode::new(key + 8);
@@ -1487,6 +1488,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         }
                         let active = |m| xkb_state.mod_name_is_active(m, xkb::STATE_MODS_EFFECTIVE);
                         ctrl_active = active(xkb::MOD_NAME_CTRL);
+                        shift_active = active(xkb::MOD_NAME_SHIFT);
                         alt_or_super = active(xkb::MOD_NAME_ALT) || active(xkb::MOD_NAME_LOGO);
                     }
                     // Shift or Ctrl going down changes nothing the app reports
@@ -1546,9 +1548,10 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                     }
 
                     // Alt / Super shortcuts (word jumps, window manager keys) move the caret in
-                    // ways the buffer cannot follow: forget the word and let the key through
-                    if alt_or_super {
-                        state.state_machine.reset();
+                    // ways the buffer cannot follow, and Shift with a caret key selects text
+                    // rather than reaching for the bar: forget the word and let the key through
+                    if alt_or_super || (shift_active && is_caret_keysym(keysym_raw)) {
+                        state.state_machine.forget_word();
                         state.hide();
                         forward!();
                         return;

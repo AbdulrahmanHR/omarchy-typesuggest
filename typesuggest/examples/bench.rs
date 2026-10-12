@@ -14,6 +14,7 @@ fn main() {
     dict.load_trigrams_tsv(include_str!("../data/trigrams.tsv"));
     let after_trigrams = t.elapsed();
     dict.add_english_contractions();
+    dict.load_proper_nouns(include_str!("../data/proper_nouns.txt"));
     let total = t.elapsed();
 
     println!("load 50k words      {after_words:?}");

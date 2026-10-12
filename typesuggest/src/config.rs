@@ -352,6 +352,26 @@ impl Default for Config {
     }
 }
 
+/// `value` without a comment at the end of the line (`learn = false # private`): a `#` after
+/// a space, outside quotes, with some value before it, so an unquoted color (`#060f12`) stays
+fn strip_comment(value: &str) -> &str {
+    let mut quote = None;
+    let mut previous = ' ';
+    for (i, c) in value.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '#' && previous.is_whitespace() && !value[..i].trim().is_empty() => {
+                return &value[..i];
+            }
+            None => {}
+        }
+        previous = c;
+    }
+    value
+}
+
 impl Config {
     pub fn load_from_file(path: &Path) -> Self {
         let mut config = Self::default();
@@ -370,12 +390,15 @@ impl Config {
             }
             if let Some((key, raw_val)) = line.split_once('=') {
                 let key = key.trim().to_lowercase();
-                let mut raw_val = raw_val.trim().to_string();
+                let mut raw_val = strip_comment(raw_val).trim().to_string();
                 // A TOML array may continue over the following lines up to its closing bracket.
                 // The next `key = value` line ends it even if the bracket is missing.
                 if raw_val.starts_with('[') && !raw_val.contains(']') {
                     while let Some(next) = lines.next_if(|next| !next.contains('=')) {
-                        let next = next.trim();
+                        let next = strip_comment(next).trim();
+                        if next.is_empty() {
+                            continue;
+                        }
                         if !next.starts_with('#') {
                             raw_val.push(',');
                             raw_val.push_str(next);
@@ -737,6 +760,22 @@ mod tests {
         assert_eq!(cfg.min_prefix_length, 1);
         assert_eq!(cfg.max_candidates, 5);
         assert_eq!(cfg.bar_scale, MAX_BAR_SCALE);
+    }
+
+    #[test]
+    fn test_comments_at_the_end_of_a_line() {
+        let mut cfg = Config::default();
+        cfg.parse_str(
+            "learn = false # private\nmax_candidates = 5 # more\nfont = \"Inter # Display\" # mine\n\
+             accept_keys = [\"enter\"] # no space\ncolor_background = #10203040\n\
+             disabled_apps = [\n  \"foot\", # terminal\n  \"kitty\"\n]\n",
+        );
+        assert!(!cfg.learn);
+        assert_eq!(cfg.max_candidates, 5);
+        assert_eq!(cfg.font, "Inter # Display");
+        assert!(cfg.accept_keys.enter && !cfg.accept_keys.space && !cfg.accept_keys.tab);
+        assert_eq!(cfg.colors.background, Some(Rgba::new(16, 32, 48, 64)));
+        assert_eq!(cfg.disabled_apps, vec!["foot", "kitty"]);
     }
 
     #[test]

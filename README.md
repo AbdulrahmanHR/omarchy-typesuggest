@@ -217,9 +217,38 @@ stores and how it detects password prompts.
 | `manifest.json`, `Panel.qml`, `Service.qml`, `Model.js` | The Omarchy plugin (bar icon and panel) |
 | `scripts/` | Install and uninstall scripts used by the panel |
 | `typesuggest/` | TypeSuggest source code (Rust) |
+| `scripts/test.sh` | Checks a checkout the way a release is checked; see [Testing your changes](#testing-your-changes) |
+| `.github/workflows/test.yml` | Runs `scripts/test.sh` on every push and pull request, forks included |
 | `.github/workflows/release.yml` | Builds and tests `typesuggest/` in an Arch Linux container on every `v*` tag and publishes the binary with its SHA-256 |
-| `typesuggest/data/` | Built-in word list, word pairs and word triples, their licenses, and the scripts that build the pairs and triples |
+| `typesuggest/tests/behaviour.rs` | End-to-end tests of what a user sees, with the built-in dictionary |
+| `typesuggest/data/` | Built-in word list, word pairs and word triples, list of names, their licenses, and the scripts that build them |
 | `release/typesuggest-x86_64.sha256` | The checksum the install script requires, committed after the release build |
+
+## Testing your changes
+
+Forked TypeSuggest, or changed it? One command checks it the way a release is checked, with
+nothing but Rust installed and no Wayland session:
+
+```bash
+scripts/test.sh            # formatting, lints, unit and behaviour tests, versions, scripts
+scripts/test.sh --quick    # just the tests
+scripts/test.sh --data     # also rebuild data/proper_nouns.txt and compare (needs hunspell)
+```
+
+The behaviour tests in [`typesuggest/tests/behaviour.rs`](typesuggest/tests/behaviour.rs) type
+into a simulated terminal and a simulated GUI text field with the dictionary the program ships
+with, so they catch a change to the data, the ranking or the key handling that breaks what a
+user sees (completions, names, context, commits, paste, privacy). Add a test there for any
+behaviour you change. On GitHub the Test workflow runs the same script on every push and pull
+request.
+
+To try a build on your own desktop:
+
+```bash
+cd typesuggest && cargo build --release
+install -m755 target/release/typesuggest ~/.local/bin/typesuggest
+systemctl --user restart typesuggest
+```
 
 ## License & credits
 

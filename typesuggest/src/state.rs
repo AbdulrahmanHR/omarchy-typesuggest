@@ -15,6 +15,7 @@ const KEY_ESCAPE: u32 = 0xff1b;
 const KEY_BACKSPACE: u32 = 0xff08;
 const KEY_DELETE: u32 = 0xffff;
 const KEY_SPACE: u32 = 0x0020;
+const KEY_INSERT: u32 = 0xff63;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMode {
@@ -80,9 +81,43 @@ pub enum KeyAction {
     SensitiveCommandSubmitted,
 }
 
+/// Shift, Ctrl, Alt, Super, Caps Lock, Num Lock and the ISO level and group shifts
+pub fn is_modifier_keysym(keysym: u32) -> bool {
+    (0xffe1..=0xffee).contains(&keysym)
+        || (0xfe01..=0xfe0f).contains(&keysym)
+        || keysym == 0xff7e
+        || keysym == 0xff7f
+}
+
+/// Dead keys (dead_grave to dead_greek), which compose an accent with the next letter
+fn is_dead_keysym(keysym: u32) -> bool {
+    (0xfe50..=0xfe93).contains(&keysym)
+}
+
+/// The main block key a keypad key with Num Lock off stands for
+fn main_block_keysym(keysym: u32) -> u32 {
+    match keysym {
+        0xff95 => KEY_HOME,
+        0xff96 => KEY_LEFT,
+        0xff97 => KEY_UP,
+        0xff98 => KEY_RIGHT,
+        0xff99 => KEY_DOWN,
+        0xff9c => KEY_END,
+        0xff9e => KEY_INSERT,
+        0xff9f => KEY_DELETE,
+        other => other,
+    }
+}
+
 pub fn is_word_char(c: char) -> bool {
     // ’ is the apostrophe apps with typographic quotes insert
     c.is_alphanumeric() || c == '\'' || c == '\u{2019}'
+}
+
+/// An apostrophe, which joins the letters of a word ("don't") but does not start one: before a
+/// word it is an opening quote ('hello), which a completion must leave in place
+fn is_apostrophe(c: char) -> bool {
+    c == '\'' || c == '\u{2019}'
 }
 
 pub fn extract_word_prefix(before_cursor: &str) -> &str {
@@ -94,7 +129,7 @@ pub fn extract_word_prefix(before_cursor: &str) -> &str {
             break;
         }
     }
-    &before_cursor[start_byte..]
+    before_cursor[start_byte..].trim_start_matches(is_apostrophe)
 }
 
 /// Whether the text after the caret in a report starts as it did `skipped` characters past
@@ -293,6 +328,10 @@ pub fn is_sensitive_command_line(line: &str) -> bool {
 pub struct InputBuffer {
     pub chars: Vec<char>,
     pub cursor: usize, // cursor index between 0 and chars.len()
+    /// The text before `chars` is not known and may run into its first word: something other
+    /// than a key put text there (a paste, a recalled command), or the caret moved in a way the
+    /// buffer cannot follow, in an app that does not report its text
+    pub unknown_start: bool,
 }
 
 impl InputBuffer {
@@ -300,12 +339,28 @@ impl InputBuffer {
         Self {
             chars: Vec::new(),
             cursor: 0,
+            unknown_start: false,
         }
     }
 
+    /// Empty the buffer at a known start: an empty line, or a new one
     pub fn clear(&mut self) {
         self.chars.clear();
         self.cursor = 0;
+        self.unknown_start = false;
+    }
+
+    /// Empty the buffer when the text at the caret is no longer known: the word being typed
+    /// may have begun before it, so it is not completed until a word starts after a space
+    pub fn forget(&mut self) {
+        self.chars.clear();
+        self.cursor = 0;
+        self.unknown_start = true;
+    }
+
+    /// Whether the whole word at the caret is in the buffer, so it can be completed
+    pub fn word_is_known(&self) -> bool {
+        !self.unknown_start || self.word_and_segment_start().0 > 0
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -317,6 +372,7 @@ impl InputBuffer {
             let drop_count = self.chars.len() - 4096;
             self.chars.drain(0..drop_count);
             self.cursor = self.cursor.saturating_sub(drop_count);
+            self.unknown_start = true;
         }
     }
 
@@ -401,6 +457,9 @@ impl InputBuffer {
                 break;
             }
         }
+        while cur_word_start < cur && is_apostrophe(before[cur_word_start]) {
+            cur_word_start += 1;
+        }
         (cur_word_start, segment_start(before, cur_word_start, cur))
     }
 
@@ -408,6 +467,19 @@ impl InputBuffer {
     pub fn in_identifier_segment(&self) -> bool {
         let (word_start, segment_begin) = self.word_and_segment_start();
         segment_begin > word_start
+    }
+
+    /// Whether the word at the caret is joined to code before it ("jo" in "get_jo",
+    /// "obj.lon", "~/lon"), rather than following a space, an opening bracket or quote or a
+    /// hyphen as a word does
+    pub fn joined_to_code(&self) -> bool {
+        let (word_start, _) = self.word_and_segment_start();
+        word_start
+            .checked_sub(1)
+            .and_then(|i| self.chars.get(i))
+            .is_some_and(|&c| {
+                !c.is_whitespace() && !"([{\"'\u{2018}\u{201c}-\u{2013}\u{2014}".contains(c)
+            })
     }
 
     /// Extract the current word prefix immediately preceding the cursor, and the
@@ -458,6 +530,15 @@ impl InputBuffer {
         self.chars.get(end).is_some_and(|&c| is_word_char(c))
     }
 
+    /// Whether a space or punctuation that ends a word follows the current suffix, so a
+    /// completed word needs no space of its own ("hel| world", "hel|.")
+    pub fn word_ends_after_suffix(&self) -> bool {
+        let end = self.cursor.min(self.chars.len()) + self.current_word_suffix().chars().count();
+        self.chars
+            .get(end)
+            .is_some_and(|&c| c.is_whitespace() || ".,;:!?)]}\"'\u{2019}\u{201d}".contains(c))
+    }
+
     /// Replace the current word around the cursor with the replacement string
     pub fn apply_replacement(
         &mut self,
@@ -481,6 +562,7 @@ impl InputBuffer {
         let before_chars: Vec<char> = before_cursor.chars().collect();
         let start = before_chars.len().saturating_sub(512);
         self.chars.extend(&before_chars[start..]);
+        self.unknown_start = start > 0;
         self.cursor = self.chars.len();
         self.chars.extend(after_cursor.chars().take(128));
     }
@@ -542,22 +624,27 @@ impl StateMachine {
     }
 
     /// Memoized `Dictionary::suggest` for the current prefix and context. A later segment
-    /// of an identifier gets no typo fallback: "ello" in "HEllo" is not a misspelled word,
+    /// of an identifier (or a word joined to code, "get_jo") gets no typo fallback or name capitals: "ello" in "HEllo" is not a misspelled word,
     /// and offering "Hello" for it would commit "HHello".
     fn suggest(&mut self, dict: &Dictionary, prefix: &str, ctx: &Context) -> Vec<String> {
-        let typo_fallback = !self.buffer.in_identifier_segment();
+        // Part of the word may be out of sight ("hel" pasted before "p"): completing the
+        // part that is known would be a wrong guess, and committing it would leave the rest
+        if !self.buffer.word_is_known() {
+            return Vec::new();
+        }
+        let whole_word = !self.buffer.in_identifier_segment() && !self.buffer.joined_to_code();
         if let Some((p, c, t, candidates)) = &self.last_suggestion
             && p == prefix
             && c == ctx
-            && *t == typo_fallback
+            && *t == whole_word
         {
             return candidates.clone();
         }
-        let candidates = dict.suggest_with(prefix, ctx, self.max_candidates, typo_fallback);
+        let candidates = dict.suggest_with(prefix, ctx, self.max_candidates, whole_word);
         self.last_suggestion = Some((
             prefix.to_string(),
             ctx.clone(),
-            typo_fallback,
+            whole_word,
             candidates.clone(),
         ));
         candidates
@@ -567,6 +654,7 @@ impl StateMachine {
     /// Only keys pressed while navigating, and the select key while suggestions are shown (it
     /// starts navigating), can be swallowed; every other key is forwarded whatever it does here.
     pub fn may_swallow(&self, keysym: u32, ctrl_active: bool) -> bool {
+        let keysym = main_block_keysym(keysym);
         match self.mode {
             InputMode::Navigating { .. } => true,
             InputMode::Suggesting { .. } => keysym == self.select_keysym() && !ctrl_active,
@@ -599,6 +687,17 @@ impl StateMachine {
         self.editing = Editing::No;
         self.reported = None;
         KeyAction::HideSuggestions
+    }
+
+    /// Close the bar and forget the word at the caret, after something changed the text or moved
+    /// the caret in a way only the app knows. An app that reports its text brings the word back
+    /// with its next report; elsewhere the next word after a space completes again.
+    pub fn forget_word(&mut self) {
+        self.mode = InputMode::Idle;
+        self.buffer.forget();
+        self.editing = Editing::No;
+        // Even a report of the same text as before is news now: it makes the buffer whole again
+        self.reported = None;
     }
 
     /// Close the bar because the user turned away from it (moved the mouse or clicked off it,
@@ -746,6 +845,25 @@ impl StateMachine {
         ctrl_active: bool,
         dict: &Dictionary,
     ) -> KeyAction {
+        // Shift, Ctrl, Caps Lock and the like change nothing on their own, not even the
+        // highlight of a bar the keyboard is in
+        if is_modifier_keysym(keysym) {
+            return KeyAction::PassThrough;
+        }
+        // The keypad's navigation keys (Num Lock off) move the caret like the main block's
+        let keysym = main_block_keysym(keysym);
+        // A dead key composes the next letter into something the key alone does not say, and
+        // Insert (Shift+Insert pastes) changes the text in ways the buffer cannot follow
+        if is_dead_keysym(keysym) || keysym == KEY_INSERT {
+            let was_suggesting = self.mode != InputMode::Idle;
+            self.forget_word();
+            return if was_suggesting {
+                KeyAction::HideSuggestions
+            } else {
+                KeyAction::PassThrough
+            };
+        }
+
         // 1. Control key shortcuts (e.g. in bash/terminals/editors). They close the bar, and
         // what they do to the text (paste, undo, word deletion) must not bring it back.
         if ctrl_active {
@@ -783,8 +901,11 @@ impl StateMachine {
                     return KeyAction::HideSuggestions;
                 }
                 _ => {
-                    if self.mode != InputMode::Idle {
-                        self.mode = InputMode::Idle;
+                    // Paste (Ctrl+V, Ctrl+Shift+V, a shell's Ctrl+Y), undo, word jumps: the
+                    // text or the caret changed in a way only the app knows
+                    let was_suggesting = self.mode != InputMode::Idle;
+                    self.forget_word();
+                    if was_suggesting {
                         return KeyAction::HideSuggestions;
                     }
                     return KeyAction::PassThrough;
@@ -932,7 +1053,10 @@ impl StateMachine {
         let suffix = self.buffer.current_word_suffix();
         // A segment completed in the middle of an identifier ("getUs|erName")
         // must not split it with a space
-        let replacement = if self.trailing_space && !self.buffer.word_continues_after_suffix() {
+        let replacement = if self.trailing_space
+            && !self.buffer.word_continues_after_suffix()
+            && !self.buffer.word_ends_after_suffix()
+        {
             format!("{} ", chosen)
         } else {
             chosen.clone()
@@ -971,10 +1095,11 @@ impl StateMachine {
 
         match keysym {
             KEY_UP => {
-                // Up in the document: clear line buffer and pass through. With select_key =
-                // "down" the bar can be showing here, and it must not outlive the word it was for
+                // Up in the document: the caret is on another line, or a terminal recalled a
+                // command, so the text at the caret is unknown. With select_key = "down" the
+                // bar can be showing here, and it must not outlive the word it was for
                 let was_suggesting = self.mode != InputMode::Idle;
-                self.buffer.clear();
+                self.buffer.forget();
                 self.dismiss();
                 if was_suggesting {
                     KeyAction::HideSuggestions
@@ -984,7 +1109,7 @@ impl StateMachine {
             }
 
             KEY_DOWN => {
-                self.buffer.clear();
+                self.buffer.forget();
                 self.dismiss();
                 KeyAction::HideSuggestions
             }
@@ -1014,7 +1139,7 @@ impl StateMachine {
             }
 
             KEY_ESCAPE => {
-                self.buffer.clear();
+                self.buffer.forget();
                 self.dismiss();
                 KeyAction::HideSuggestions
             }
@@ -1533,10 +1658,10 @@ mod tests {
         assert_eq!(sm.mode, InputMode::Idle);
         assert_eq!(sm.buffer.chars.iter().collect::<String>(), "pro.");
 
-        // A key without text (Shift) is forwarded; the bar stays up without the highlight
+        // A key without text (Page Down) is forwarded; the bar stays up without the highlight
         sm.reset();
         type_and_navigate(&mut sm, &dict, "pro");
-        let act = sm.handle_key_press(0xffe1, None, false, &dict);
+        let act = sm.handle_key_press(0xff56, None, false, &dict);
         assert!(!is_swallowed(&act), "{act:?}");
         assert!(matches!(act, KeyAction::ShowSuggestions { .. }));
         assert!(matches!(sm.mode, InputMode::Suggesting { .. }));
@@ -1544,6 +1669,17 @@ mod tests {
         // Navigation is over, so Enter no longer commits
         let act = sm.handle_key_press(0xff0d, None, false, &dict);
         assert_eq!(act, KeyAction::HideSuggestions);
+
+        // Shift or Caps Lock on its own changes nothing: the highlight stays and Enter commits
+        sm.reset();
+        type_and_navigate(&mut sm, &dict, "pro");
+        for modifier in [0xffe1, 0xffe5] {
+            let act = sm.handle_key_press(modifier, None, false, &dict);
+            assert_eq!(act, KeyAction::PassThrough);
+            assert!(matches!(sm.mode, InputMode::Navigating { .. }));
+        }
+        let act = sm.handle_key_press(0xff0d, None, false, &dict);
+        assert!(matches!(act, KeyAction::CommitCandidate { .. }));
     }
 
     #[test]
@@ -1993,12 +2129,192 @@ mod tests {
             KeyAction::CommitCandidate {
                 deleted_before: "beg".to_string(),
                 deleted_after: "inning".to_string(),
-                replacement: "beginning ".to_string(),
+                // " to see" follows, so the word needs no space of its own
+                replacement: "beginning".to_string(),
                 prev_word: Some("was".to_string()),
                 chosen_word: "beginning".to_string(),
             }
         );
         assert_eq!(sm.mode, InputMode::Idle);
+    }
+
+    #[test]
+    fn test_pasting_in_a_terminal_leaves_the_word_unknown() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        for c in "a ".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        // Ctrl+Shift+V pastes "hel"; a terminal reports nothing
+        let act = sm.handle_key_press(0x0056, None, true, &dict);
+        assert_eq!(act, KeyAction::PassThrough);
+        // "p" goes on with the pasted word: it is "help", not "p", so nothing is offered
+        let act = sm.handle_key_press('p' as u32, Some('p'), false, &dict);
+        assert_eq!(act, KeyAction::PassThrough);
+        assert_eq!(sm.commit_candidate(0), None);
+        let act = sm.handle_key_press(KEY_BACKSPACE, None, false, &dict);
+        assert!(!matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+        // After a space the next word is typed in full and completes again
+        for c in "x ".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        let act = sm.handle_key_press('p' as u32, Some('p'), false, &dict);
+        assert!(
+            matches!(&act, KeyAction::ShowSuggestions { prefix, .. } if prefix == "p"),
+            "{act:?}"
+        );
+        // Backspacing over that space reaches the unknown word again
+        sm.handle_key_press(KEY_BACKSPACE, None, false, &dict);
+        let act = sm.handle_key_press(KEY_BACKSPACE, None, false, &dict);
+        assert!(!matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+    }
+
+    #[test]
+    fn test_shift_insert_and_keypad_insert_paste() {
+        let dict = setup_dict();
+        for insert in [KEY_INSERT, 0xff9e] {
+            let mut sm = StateMachine::new(3);
+            for c in "a ".chars() {
+                sm.handle_key_press(c as u32, Some(c), false, &dict);
+            }
+            sm.handle_key_press(insert, None, false, &dict);
+            let act = sm.handle_key_press('p' as u32, Some('p'), false, &dict);
+            assert_eq!(act, KeyAction::PassThrough);
+        }
+        // A GUI app reports the pasted text: the bar stays down, as after Ctrl+V, and the
+        // next key completes the whole word
+        let mut sm = StateMachine::new(3);
+        type_with_reports(&mut sm, &dict, "", "a ");
+        sm.handle_key_press(KEY_INSERT, None, false, &dict);
+        let act = report(&mut sm, &dict, "a prog", 6);
+        assert_eq!(act, KeyAction::PassThrough);
+        let act = sm.handle_key_press('r' as u32, Some('r'), false, &dict);
+        assert!(
+            matches!(&act, KeyAction::ShowSuggestions { prefix, candidates }
+            if prefix == "progr" && candidates[0] == "program"),
+            "{act:?}"
+        );
+    }
+
+    #[test]
+    fn test_pasted_part_of_a_word_is_completed_once_the_app_reports_it() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        report(&mut sm, &dict, "", 0);
+        sm.handle_key_press(0x0076, None, true, &dict); // Ctrl+V
+        let act = report(&mut sm, &dict, "prog", 4);
+        assert_eq!(act, KeyAction::PassThrough);
+        let act = sm.handle_key_press('r' as u32, Some('r'), false, &dict);
+        assert!(
+            matches!(&act, KeyAction::ShowSuggestions { prefix, candidates }
+            if prefix == "progr" && candidates[0] == "program"),
+            "{act:?}"
+        );
+        assert!(matches!(
+            report(&mut sm, &dict, "progr", 5),
+            KeyAction::ShowSuggestions { .. }
+        ));
+    }
+
+    #[test]
+    fn test_paste_of_unchanged_looking_text_still_resyncs() {
+        // The app reports the same text as before the paste key (nothing was on the
+        // clipboard): the report still makes the word known again
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        type_with_reports(&mut sm, &dict, "", "pro");
+        sm.handle_key_press(0x0076, None, true, &dict);
+        report(&mut sm, &dict, "pro", 3);
+        let act = sm.handle_key_press('g' as u32, Some('g'), false, &dict);
+        assert!(
+            matches!(&act, KeyAction::ShowSuggestions { prefix, .. } if prefix == "prog"),
+            "{act:?}"
+        );
+    }
+
+    #[test]
+    fn test_recalled_command_and_dead_keys_leave_the_word_unknown() {
+        let dict = setup_dict();
+        // Up recalls `say "hel` in a terminal; "lo" must not be completed as a word
+        let mut sm = StateMachine::new(3);
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        for c in "lo".chars() {
+            let act = sm.handle_key_press(c as u32, Some(c), false, &dict);
+            assert_eq!(act, KeyAction::PassThrough);
+        }
+        // A dead key composes something the buffer cannot know: the bar closes
+        let mut sm = StateMachine::new(3);
+        for c in "pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        let act = sm.handle_key_press(0xfe51 /* dead_acute */, None, false, &dict);
+        assert_eq!(act, KeyAction::HideSuggestions);
+        let act = sm.handle_key_press('e' as u32, Some('e'), false, &dict);
+        assert_eq!(act, KeyAction::PassThrough);
+    }
+
+    #[test]
+    fn test_keypad_arrows_move_the_caret() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        for c in "hello wor".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        for _ in 0..3 {
+            sm.handle_key_press(0xff96 /* KP_Left */, None, false, &dict);
+        }
+        sm.handle_key_press('x' as u32, Some('x'), false, &dict);
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "hello xwor");
+        // KP_Up is the select key too, and may be swallowed for it
+        let mut sm = StateMachine::new(3);
+        for c in "pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        assert!(sm.may_swallow(0xff97, false));
+        assert_eq!(
+            sm.handle_key_press(0xff97, None, false, &dict),
+            KeyAction::UpdateSelection { index: 0 }
+        );
+    }
+
+    #[test]
+    fn test_an_opening_quote_is_kept_by_a_commit() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        for c in "say 'pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        let act = sm.commit_candidate(0).expect("suggestions shown");
+        assert!(
+            matches!(&act, KeyAction::CommitCandidate { deleted_before, .. } if deleted_before == "pro"),
+            "{act:?}"
+        );
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "say 'program ");
+        assert_eq!(extract_word_prefix("say 'hel"), "hel");
+        assert_eq!(extract_word_prefix("don't"), "don't");
+    }
+
+    #[test]
+    fn test_no_trailing_space_before_a_space_or_punctuation() {
+        let dict = setup_dict();
+        for (after, expected) in [
+            (" world", "program world"),
+            (".", "program."),
+            (")", "program)"),
+        ] {
+            // The caret is in front of `after` while "pro" is typed
+            let mut sm = StateMachine::new(3);
+            report(&mut sm, &dict, after, 0);
+            let mut before = String::new();
+            for c in "pro".chars() {
+                sm.handle_key_press(c as u32, Some(c), false, &dict);
+                before.push(c);
+                report(&mut sm, &dict, &format!("{before}{after}"), before.len());
+            }
+            let act = sm.commit_candidate(0).expect("suggestions shown");
+            assert!(matches!(act, KeyAction::CommitCandidate { .. }));
+            assert_eq!(sm.buffer.chars.iter().collect::<String>(), expected);
+        }
     }
 
     #[test]
@@ -2488,14 +2804,15 @@ mod tests {
         assert_eq!(act, KeyAction::HideSuggestions);
         assert_eq!(sm.mode, InputMode::Idle);
 
-        for c in "pro".chars() {
+        // Up may have recalled a command, so the next word is the one after a space
+        for c in " pro".chars() {
             sm.handle_key_press(c as u32, Some(c), false, &dict);
         }
         assert!(sm.may_swallow(KEY_DOWN, false));
         let act = sm.handle_key_press(KEY_DOWN, None, false, &dict);
         assert_eq!(act, KeyAction::UpdateSelection { index: 0 });
         sm.handle_key_press(KEY_TAB, None, false, &dict);
-        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "program ");
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), " program ");
 
         // In the bar, Down again stays there, while Up (the way back to the text) and Escape
         // leave it
