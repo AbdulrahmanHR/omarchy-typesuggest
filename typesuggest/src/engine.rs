@@ -2,7 +2,7 @@ use crate::config::{BarPosition, Config, ConfigSource};
 use crate::dict::{Dictionary, write_user_bigrams_file};
 use crate::security::{
     get_hyprland_active_window, get_hyprland_max_monitor_extent, has_sensitive_descendant,
-    is_sensitive_window,
+    is_sensitive_window, is_session_locked,
 };
 use crate::shm::{BUFFER_SCALE, draw_pixmap_to_surface, hide_surface};
 use crate::state::{InputMode, KeyAction, StateMachine, is_modifier_keysym};
@@ -439,6 +439,13 @@ impl Engine {
         let now = std::time::Instant::now();
         if now.duration_since(self.last_window_check) >= std::time::Duration::from_millis(40) {
             self.last_window_check = now;
+
+            // Lock screen password field: it has no window and asks for no password content type
+            if is_session_locked() {
+                self.set_sensitive(true);
+                return true;
+            }
+
             if let Some(win) = get_hyprland_active_window() {
                 self.active_window_pid = Some(win.pid);
                 // Focus can move between windows without a new activation

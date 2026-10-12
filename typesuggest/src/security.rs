@@ -136,6 +136,25 @@ pub fn get_hyprland_active_window() -> Option<HyprlandWindow> {
     Some(HyprlandWindow { pid, class, title })
 }
 
+/// Whether the session is locked (an ext-session-lock is held, as by Omarchy's lock screen).
+/// Lock screens have no window, so the active window still names whatever was focused before.
+pub fn is_session_locked() -> bool {
+    hyprland_request(b"j/monitors").is_some_and(|text| monitors_show_lock(&text))
+}
+
+/// See [`is_session_locked`]; `text` is Hyprland's `j/monitors` reply. Hyprland reports no lock
+/// state directly, but a held session lock is one of the reasons it lists in a monitor's
+/// `solitaryBlockedBy`: "LOCK".
+pub fn monitors_show_lock(text: &str) -> bool {
+    let needle = "\"solitaryBlockedBy\":";
+    text.match_indices(needle).any(|(i, _)| {
+        let rest = text[i + needle.len()..].trim_start();
+        rest.strip_prefix('[')
+            .and_then(|list| list.split(']').next())
+            .is_some_and(|list| list.split(',').any(|r| r.trim() == "\"LOCK\""))
+    })
+}
+
 /// The tallest logical monitor height (rotation taken into account), from Hyprland's monitor list
 pub fn get_hyprland_max_monitor_extent() -> Option<u32> {
     max_monitor_extent(&hyprland_request(b"j/monitors")?)
@@ -355,6 +374,19 @@ pub fn is_sensitive_window(title: &str, class: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_monitors_show_lock() {
+        // Trimmed from real `hyprctl -j monitors` replies, unlocked and locked
+        let unlocked = r#"[{"id": 0, "name": "eDP-1", "description": "LOCK display",
+            "solitaryBlockedBy": ["WINDOWED", "CANDIDATE"], "activelyTearing": false}]"#;
+        let locked = r#"[{"id": 0, "name": "eDP-1", "solitaryBlockedBy": ["WINDOWED"]},
+            {"id": 1, "name": "HDMI-A-1", "solitaryBlockedBy": [ "LOCK", "CANDIDATE" ]}]"#;
+        assert!(!monitors_show_lock(unlocked));
+        assert!(monitors_show_lock(locked));
+        assert!(!monitors_show_lock(r#"[{"solitaryBlockedBy": "LOCK"}]"#));
+        assert!(!monitors_show_lock(""));
+    }
 
     #[test]
     fn test_max_monitor_extent() {
