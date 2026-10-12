@@ -577,6 +577,8 @@ pub struct StateMachine {
     pub select_key: SelectKey,
     /// Keys that commit the highlighted candidate while navigating
     pub accept_keys: AcceptKeys,
+    /// Tab commits the first candidate while suggesting, without entering navigation
+    pub tab_accepts_first: bool,
     /// Append a space after the committed word
     pub trailing_space: bool,
     /// Last (prefix, context, typo fallback) lookup and its result. GUI apps echo each
@@ -604,6 +606,7 @@ impl StateMachine {
             min_prefix_length: 1,
             select_key: SelectKey::default(),
             accept_keys: AcceptKeys::default(),
+            tab_accepts_first: false,
             trailing_space: true,
             last_suggestion: None,
             editing: Editing::No,
@@ -617,6 +620,7 @@ impl StateMachine {
         self.min_prefix_length = config.min_prefix_length.max(1);
         self.select_key = config.select_key;
         self.accept_keys = config.accept_keys;
+        self.tab_accepts_first = config.tab_accepts_first;
         self.trailing_space = config.trailing_space;
         self.invalidate_suggestions();
         // The next report is looked up again with the new settings, even if the text is the same
@@ -652,12 +656,17 @@ impl StateMachine {
 
     /// Whether `handle_key_press` might swallow this key instead of letting it reach the app.
     /// Only keys pressed while navigating, and the select key while suggestions are shown (it
-    /// starts navigating), can be swallowed; every other key is forwarded whatever it does here.
+    /// starts navigating) or Tab with `tab_accepts_first`, can be swallowed; every other key
+    /// is forwarded whatever it does here.
     pub fn may_swallow(&self, keysym: u32, ctrl_active: bool) -> bool {
         let keysym = main_block_keysym(keysym);
         match self.mode {
             InputMode::Navigating { .. } => true,
-            InputMode::Suggesting { .. } => keysym == self.select_keysym() && !ctrl_active,
+            InputMode::Suggesting { .. } => {
+                !ctrl_active
+                    && (keysym == self.select_keysym()
+                        || (keysym == KEY_TAB && self.tab_accepts_first))
+            }
             InputMode::Idle => false,
         }
     }
@@ -913,7 +922,17 @@ impl StateMachine {
             }
         }
 
-        // 2. If currently in Navigating mode, handle candidate selection keys
+        // 2. With tab_accepts_first, Tab takes the first suggestion without the select key
+        // and is swallowed, as an accept key is
+        if keysym == KEY_TAB
+            && self.tab_accepts_first
+            && matches!(self.mode, InputMode::Suggesting { .. })
+            && let Some(commit) = self.commit_candidate(0)
+        {
+            return commit;
+        }
+
+        // 3. If currently in Navigating mode, handle candidate selection keys
         if let InputMode::Navigating {
             candidates,
             selected_index,
@@ -1391,6 +1410,65 @@ mod tests {
             }
         );
         assert_eq!(sm.mode, InputMode::Idle);
+    }
+
+    #[test]
+    fn test_tab_accepts_first_without_the_select_key() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        sm.tab_accepts_first = true;
+        for c in "pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        assert!(matches!(sm.mode, InputMode::Suggesting { .. }));
+        assert!(sm.may_swallow(KEY_TAB, false));
+
+        let act = sm.handle_key_press(KEY_TAB, None, false, &dict);
+        assert_eq!(
+            act,
+            KeyAction::CommitCandidate {
+                deleted_before: "pro".to_string(),
+                deleted_after: String::new(),
+                replacement: "program ".to_string(),
+                prev_word: None,
+                chosen_word: "program".to_string(),
+            }
+        );
+        assert_eq!(sm.mode, InputMode::Idle);
+
+        // With no suggestions showing, Tab reaches the app as usual
+        assert!(!sm.may_swallow(KEY_TAB, false));
+        assert!(!is_swallowed(
+            &sm.handle_key_press(KEY_TAB, None, false, &dict)
+        ));
+    }
+
+    #[test]
+    fn test_tab_needs_the_select_key_without_tab_accepts_first() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        for c in "pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        assert!(!sm.may_swallow(KEY_TAB, false));
+        let act = sm.handle_key_press(KEY_TAB, None, false, &dict);
+        assert!(!is_swallowed(&act), "Tab swallowed via {act:?}");
+    }
+
+    #[test]
+    fn test_tab_accepts_first_keeps_the_highlight_while_navigating() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        sm.tab_accepts_first = true;
+        for c in "pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        sm.handle_key_press(KEY_RIGHT, None, false, &dict);
+        let act = sm.handle_key_press(KEY_TAB, None, false, &dict);
+        assert!(
+            matches!(act, KeyAction::CommitCandidate { ref chosen_word, .. } if chosen_word == "project")
+        );
     }
 
     #[test]
@@ -1879,6 +1957,7 @@ mod tests {
                 space: false,
                 tab: true,
             },
+            tab_accepts_first: true,
             trailing_space: false,
             ..Config::default()
         };
@@ -1886,6 +1965,7 @@ mod tests {
         assert_eq!(sm.buffer.chars.iter().collect::<String>(), "pr");
         assert!(matches!(sm.mode, InputMode::Suggesting { .. }));
         assert_eq!(sm.accept_keys, config.accept_keys);
+        assert!(sm.tab_accepts_first);
         assert!(!sm.trailing_space);
 
         // Same prefix again: the memoized 3-candidate lookup must not be reused
@@ -2764,12 +2844,13 @@ mod tests {
         .collect();
 
         for (select_key, select) in [(SelectKey::Up, KEY_UP), (SelectKey::Down, KEY_DOWN)] {
-            for ctrl in [false, true] {
+            for (ctrl, tab_first) in [(false, false), (true, false), (false, true), (true, true)] {
                 for &(key, ch) in &keys {
                     // Idle, Suggesting and Navigating, all reached by typing "pro"
                     for setup in 0..3 {
                         let mut sm = StateMachine::new(3);
                         sm.select_key = select_key;
+                        sm.tab_accepts_first = tab_first;
                         if setup >= 1 {
                             for c in "pro".chars() {
                                 sm.handle_key_press(c as u32, Some(c), false, &dict);
@@ -2782,7 +2863,7 @@ mod tests {
                         let act = sm.handle_key_press(key, ch, ctrl, &dict);
                         assert!(
                             may || !is_swallowed(&act),
-                            "{select_key:?} key {key:#x} ctrl={ctrl} setup={setup} swallowed via {act:?}"
+                            "{select_key:?} key {key:#x} ctrl={ctrl} tab_first={tab_first} setup={setup} swallowed via {act:?}"
                         );
                     }
                 }

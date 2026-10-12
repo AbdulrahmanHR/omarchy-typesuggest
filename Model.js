@@ -33,6 +33,7 @@ function defaultConfig() {
     theme: "omarchy",
     select_key: "up",
     accept_keys: acceptKeyNames(),
+    tab_accepts_first: false,
     trailing_space: true,
     hover_highlight: true,
     mouse_hides_bar: false,
@@ -78,6 +79,8 @@ function normalizeConfig(data) {
     // can leave out a setting that build would refuse
     select_key: data.select_key === undefined ? null : pick(data.select_key, selectKeys(), base.select_key),
     accept_keys: normalizeAcceptKeys(data.accept_keys),
+    // null when the installed typesuggest predates tab_accepts_first
+    tab_accepts_first: typeof data.tab_accepts_first === "boolean" ? data.tab_accepts_first : null,
     trailing_space: typeof data.trailing_space === "boolean" ? data.trailing_space : base.trailing_space,
     // null when the installed typesuggest predates these mouse settings (before 1.2.1),
     // so the panel leaves out rows that build would refuse

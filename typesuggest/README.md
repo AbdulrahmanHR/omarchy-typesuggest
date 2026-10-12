@@ -174,7 +174,7 @@ Hovering a suggestion highlights it. Before the select key (`Up` by default) the
 
 A click within a moment (0.3 s) of the bar appearing or changing its words is ignored, so the second click of a double click, or a click aimed at the text as the bar pops up, never takes a word. If the bar appears under a mouse that has not moved, move it slightly before clicking: Hyprland does not tell TypeSuggest where a still pointer is, so such a click takes no word (with the bar above the caret it hides the bar instead).
 
-The key that enters navigation (`select_key`, `Up` or `Down`), the keys that commit (`accept_keys`) and the space after the word (`trailing_space`) can be changed in the configuration. A key left out of `accept_keys` ends navigation and reaches the app as usual, so with `accept_keys = space, tab` Enter always sends your message.
+The key that enters navigation (`select_key`, `Up` or `Down`), the keys that commit (`accept_keys`) and the space after the word (`trailing_space`) can be changed in the configuration. A key left out of `accept_keys` ends navigation and reaches the app as usual, so with `accept_keys = space, tab` Enter always sends your message. With `tab_accepts_first = true`, Tab takes the first suggestion straight away, no select key needed.
 
 ---
 
@@ -219,6 +219,9 @@ select_key = "up"
 # Keys that commit the highlighted suggestion after the select key (default: enter, space, tab)
 accept_keys = enter, space, tab
 
+# Tab takes the first suggestion without the select key (default: false)
+tab_accepts_first = false
+
 # Insert a space after the committed word (default: true)
 trailing_space = true
 
@@ -250,6 +253,7 @@ font = ""
 | `color_background`, `color_border`, `color_pill`, `color_pill_border`, `color_text`, `color_accent`, `color_accent_text` | unset | Override single colors (bar background and border, unselected pill background, border and text, selected pill background and text) as `"#rrggbb"` or `"#rrggbbaa"`. Invalid values are ignored. |
 | `select_key` | `"up"` | Arrow key that moves into the suggestions while they show: `"up"` or `"down"`. The other arrow then moves the caret as usual. In navigation, the other arrow or `Escape` goes back to the text, and the select key again stays in the bar. |
 | `accept_keys` | `enter, space, tab` | Keys that commit the highlighted suggestion. Any of `enter`, `space`, `tab`; also written as `["enter", "tab"]`. Other keys end navigation and reach the app. |
+| `tab_accepts_first` | `false` | Tab commits the first suggestion while the bar shows, without pressing the select key first. Once you are in navigation, Tab takes the highlighted word as usual. Tab reaches the app when no suggestions show. |
 | `trailing_space` | `true` | Add a space after the committed word. The accept key itself is still swallowed. |
 | `hover_highlight` | `true` | Highlight the suggestion under the mouse the way the keyboard selection is shown. A click takes the word under the mouse either way. |
 | `mouse_hides_bar` | `false` | Only with `bar_position = "above"`: hide the bar as soon as the mouse moves over the empty area above it, so a click there always reaches the text. Off, the bar stays until that area is clicked. |

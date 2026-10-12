@@ -24,6 +24,8 @@ pub struct Config {
     pub select_key: SelectKey,
     /// Keys that commit the highlighted suggestion while navigating
     pub accept_keys: AcceptKeys,
+    /// Tab commits the first suggestion while the bar shows, without the select key first
+    pub tab_accepts_first: bool,
     /// Append a space after a committed word
     pub trailing_space: bool,
     /// Highlight the suggestion under the mouse the way the keyboard selection is drawn
@@ -171,6 +173,7 @@ const SETTABLE_KEYS: &[(&str, &[&str])] = &[
     ("theme", &[]),
     ("select_key", &[]),
     ("accept_keys", &[]),
+    ("tab_accepts_first", &[]),
     ("trailing_space", &[]),
     ("hover_highlight", &[]),
     ("mouse_hides_bar", &[]),
@@ -201,9 +204,8 @@ pub fn config_line(key: &str, value: &str) -> Result<String, String> {
     };
 
     let stored = match key {
-        "learn" | "trailing_space" | "typo_correction" | "hover_highlight" | "mouse_hides_bar" => {
-            parse_bool()?.to_string()
-        }
+        "learn" | "tab_accepts_first" | "trailing_space" | "typo_correction"
+        | "hover_highlight" | "mouse_hides_bar" => parse_bool()?.to_string(),
         "min_prefix_length" | "max_candidates" => {
             let max = if key == "max_candidates" { 5 } else { 10 };
             let n = value.parse::<usize>().map_err(|_| invalid())?;
@@ -342,6 +344,7 @@ impl Default for Config {
             colors: ColorOverrides::default(),
             select_key: SelectKey::Up,
             accept_keys: AcceptKeys::default(),
+            tab_accepts_first: false,
             trailing_space: true,
             hover_highlight: true,
             mouse_hides_bar: false,
@@ -448,6 +451,11 @@ impl Config {
                     "accept_keys" => {
                         self.accept_keys = parse_accept_keys(&raw_val).unwrap_or_default();
                     }
+                    "tab_accepts_first" => {
+                        if let Ok(b) = val.parse::<bool>() {
+                            self.tab_accepts_first = b;
+                        }
+                    }
                     "trailing_space" => {
                         if let Ok(b) = val.parse::<bool>() {
                             self.trailing_space = b;
@@ -498,7 +506,7 @@ impl Config {
         };
         let apps: Vec<&str> = self.disabled_apps.iter().map(String::as_str).collect();
         format!(
-            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"trailing_space\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"disabled_apps\":{},\"font\":{}}}",
+            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"tab_accepts_first\":{},\"trailing_space\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"disabled_apps\":{},\"font\":{}}}",
             self.learn,
             self.min_prefix_length,
             self.max_candidates,
@@ -507,6 +515,7 @@ impl Config {
             json_string(self.theme.name()),
             json_string(self.select_key.name()),
             list(&self.accept_keys.names()),
+            self.tab_accepts_first,
             self.trailing_space,
             self.hover_highlight,
             self.mouse_hides_bar,
@@ -568,6 +577,10 @@ select_key = "up"
 # Keys that commit the highlighted suggestion after pressing the select key
 # (default: enter, space, tab). Any other key leaves the suggestions and reaches the app as usual.
 accept_keys = enter, space, tab
+
+# Tab takes the first suggestion straight away, without pressing the select key first
+# (default: false). Tab still reaches the app when no suggestions are showing.
+tab_accepts_first = false
 
 # Insert a space after the committed word (default: true)
 trailing_space = true
@@ -704,6 +717,7 @@ mod tests {
         assert!(cfg.hover_highlight);
         assert!(!cfg.mouse_hides_bar);
         assert_eq!(cfg.accept_keys, AcceptKeys::default());
+        assert!(!cfg.tab_accepts_first);
         assert!(cfg.trailing_space);
         assert!(cfg.disabled_apps.is_empty());
         assert!(cfg.typo_correction);
@@ -731,6 +745,7 @@ mod tests {
             color_background = #10203040
             color_text = "not a color"
             trailing_space = false
+            tab_accepts_first = true
             hover_highlight = false
             mouse_hides_bar = true
             typo_correction = false
@@ -746,6 +761,7 @@ mod tests {
         assert_eq!(cfg.colors.background, Some(Rgba::new(16, 32, 48, 64)));
         assert_eq!(cfg.colors.text, None);
         assert!(!cfg.trailing_space);
+        assert!(cfg.tab_accepts_first);
         assert!(!cfg.hover_highlight);
         assert!(cfg.mouse_hides_bar);
         assert!(!cfg.typo_correction);
@@ -797,6 +813,10 @@ mod tests {
         assert_eq!(
             config_line("hover_highlight", "off").unwrap(),
             "hover_highlight = false"
+        );
+        assert_eq!(
+            config_line("tab_accepts_first", "on").unwrap(),
+            "tab_accepts_first = true"
         );
         assert_eq!(
             config_line("mouse_hides_bar", "yes").unwrap(),

@@ -249,6 +249,10 @@ fn print_help() {
     println!(
         "    accept_keys = enter, space, tab  Keys that commit the highlighted word (all three)"
     );
+    println!(
+        "    tab_accepts_first = true | false Tab takes the first word without the select key"
+    );
+    println!("                                     (false)");
     println!("    trailing_space = true | false    Add a space after the committed word (true)");
     println!(
         "    hover_highlight = true | false   Highlight the suggestion under the mouse (true)"
@@ -276,6 +280,7 @@ fn print_help() {
         "    - Press an accept key (Enter, Space, or Tab by default) to commit the selected word"
     );
     println!("      (swallowing the key); any other key leaves navigation and reaches the app");
+    println!("    - With tab_accepts_first, Tab takes the first suggestion without the arrow key");
     println!("    - Or click a suggestion with the left mouse button to commit it straight away;");
     println!("      the one under the mouse is highlighted (hover_highlight)");
 }
@@ -552,6 +557,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Theme: {}", config.theme.name());
     println!("  - Select key: {}", config.select_key.name());
     println!("  - Accept keys: {}", config.accept_keys.names().join(", "));
+    println!(
+        "  - Tab accepts first: {}",
+        if config.tab_accepts_first {
+            "on"
+        } else {
+            "off"
+        }
+    );
     println!(
         "  - Trailing space: {}",
         if config.trailing_space { "on" } else { "off" }

@@ -26,6 +26,7 @@ Panel {
   //   count          1 to 5 suggestions
   //   select         Down, Up (only when typesuggest reports select_key)
   //   keys           Enter, Space, Tab
+  //   tabfirst       switch row (when typesuggest reports tab_accepts_first)
   //   learn, typo    switch rows
   //   hover          switch row (when typesuggest reports hover_highlight)
   //   mousehide      switch row (likewise, and only with the bar above the caret)
@@ -98,6 +99,8 @@ Panel {
   // Older typesuggest builds report no mouse settings
   readonly property bool mouseSettingsSupported: typeof root.config.hover_highlight === "boolean"
     && typeof root.config.mouse_hides_bar === "boolean"
+  // Older typesuggest builds (before tab_accepts_first) report nothing for it
+  readonly property bool tabFirstSupported: typeof root.config.tab_accepts_first === "boolean"
   readonly property bool showMouseHidesBar: mouseSettingsSupported && root.config.bar_position === "above"
 
   readonly property var sections: {
@@ -107,7 +110,9 @@ Panel {
     if (settingsReady) {
       list = list.concat(["look", "size", "count"])
       if (selectKeySupported) list.push("select")
-      list = list.concat(["keys", "learn", "typo"])
+      list.push("keys")
+      if (tabFirstSupported) list.push("tabfirst")
+      list = list.concat(["learn", "typo"])
       if (mouseSettingsSupported) list.push("hover")
       if (showMouseHidesBar) list.push("mousehide")
     }
@@ -183,6 +188,7 @@ Panel {
     else if (focusSection === "count") typesuggest.setOption("max_candidates", i + 1)
     else if (focusSection === "select") typesuggest.setOption("select_key", Model.selectKeys()[i])
     else if (focusSection === "keys") typesuggest.toggleAcceptKey(Model.acceptKeyNames()[i])
+    else if (focusSection === "tabfirst") typesuggest.setOption("tab_accepts_first", !root.config.tab_accepts_first)
     else if (focusSection === "learn") typesuggest.setOption("learn", !root.config.learn)
     else if (focusSection === "typo") typesuggest.setOption("typo_correction", !root.config.typo_correction)
     else if (focusSection === "hover") typesuggest.setOption("hover_highlight", !root.config.hover_highlight)
@@ -613,6 +619,16 @@ Panel {
             visible: root.settingsReady
             width: parent.width
             spacing: Style.space(6)
+
+            SwitchRow {
+              visible: root.tabFirstSupported
+              width: parent.width
+              section: "tabfirst"
+              title: "Tab takes first"
+              caption: "Tab commits the first suggestion without " + root.selectKeyLabel
+              checked: root.config.tab_accepts_first === true
+              onToggled: typesuggest.setOption("tab_accepts_first", !root.config.tab_accepts_first)
+            }
 
             SwitchRow {
               width: parent.width
