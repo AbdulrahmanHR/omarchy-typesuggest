@@ -9,6 +9,8 @@ pub struct Renderer {
     pub bar_scale: f32,
     /// Bar colors: the theme's palette with the config's `color_*` overrides applied
     pub palette: Palette,
+    /// Draw each suggestion's number in its pill's corner (config `number_select`)
+    pub show_numbers: bool,
 }
 
 /// Where a candidate's pill sits on the bar, in pixmap pixels
@@ -26,6 +28,8 @@ struct BarLayout {
     /// Pixels per point: 2x HiDPI times the user's bar size
     scale: f32,
     font_size: f32,
+    /// Extra room on the left of each pill for its number, zero without numbers
+    number_gap: f32,
     /// Pixmap size, rounded up to even numbers
     width: u32,
     height: u32,
@@ -46,6 +50,7 @@ impl Renderer {
             font: load_font(font)?,
             bar_scale: 1.0,
             palette: Palette::BUILTIN,
+            show_numbers: false,
         })
     }
 
@@ -81,12 +86,13 @@ impl Renderer {
         let bar_padding_v = 4.5 * scale;
         let pill_height: f32 = 23.0 * scale;
         let bar_height: f32 = pill_height + (bar_padding_v * 2.0);
+        let number_gap = if self.show_numbers { 5.0 * scale } else { 0.0 };
 
         // Measure widths for each candidate pill
         let mut pill_widths = Vec::new();
         for word in candidates {
             let text_w = self.measure_text(word, font_size);
-            let pill_w = (text_w + (pill_padding_h * 2.0)).max(52.0 * scale);
+            let pill_w = (text_w + (pill_padding_h * 2.0) + number_gap).max(52.0 * scale);
             pill_widths.push(pill_w);
         }
 
@@ -113,6 +119,7 @@ impl Renderer {
         Some(BarLayout {
             scale,
             font_size,
+            number_gap,
             width: even(bar_width_f),
             height: even(bar_height),
             bar_height,
@@ -138,6 +145,7 @@ impl Renderer {
         let BarLayout {
             scale,
             font_size,
+            number_gap,
             width: bar_width,
             height: bar_height_u32,
             bar_height,
@@ -214,13 +222,32 @@ impl Renderer {
                 palette.text
             };
             let text_w = self.measure_text(word, font_size);
-            let text_x = pill.x + ((pill.width - text_w) / 2.0);
+            let text_x = pill.x + number_gap + ((pill.width - number_gap - text_w) / 2.0);
 
             // Optical vertical centering using 'H' cap-height
             let h_metrics = self.font.metrics('H', font_size);
             let text_y = pill.y + (pill.height + h_metrics.height as f32) / 2.0 - (1.0 * scale);
 
             self.draw_text(&mut pixmap, word, text_x, text_y, font_size, text_color);
+
+            // The number that picks this suggestion, small and faint in the top left corner
+            if self.show_numbers {
+                let number = (i + 1).to_string();
+                let number_size = font_size * 0.6;
+                let digit_height = self.font.metrics('1', number_size).height as f32;
+                let number_color = Rgba {
+                    a: (text_color.a as f32 * 0.65).round() as u8,
+                    ..text_color
+                };
+                self.draw_text(
+                    &mut pixmap,
+                    &number,
+                    pill.x + 5.0 * scale,
+                    pill.y + 3.5 * scale + digit_height,
+                    number_size,
+                    number_color,
+                );
+            }
         }
 
         Some(pixmap)

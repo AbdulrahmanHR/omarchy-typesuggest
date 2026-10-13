@@ -94,6 +94,18 @@ fn is_dead_keysym(keysym: u32) -> bool {
     (0xfe50..=0xfe93).contains(&keysym)
 }
 
+/// Which suggestion (0 for the first) a number key picks with `number_select`, from its evdev
+/// code: the digits row and the keypad, wherever the layout puts the digits themselves
+pub fn number_key_index(evdev_key: u32) -> Option<usize> {
+    match evdev_key {
+        2..=10 => Some(evdev_key as usize - 2),
+        79..=81 => Some(evdev_key as usize - 79),
+        75..=77 => Some(evdev_key as usize - 72),
+        71..=73 => Some(evdev_key as usize - 65),
+        _ => None,
+    }
+}
+
 /// The main block key a keypad key with Num Lock off stands for
 fn main_block_keysym(keysym: u32) -> u32 {
     match keysym {
@@ -1055,6 +1067,16 @@ impl StateMachine {
         }
     }
 
+    /// The suggestions on the bar, highlighted or not
+    pub fn shown_candidates(&self) -> Option<&[String]> {
+        match &self.mode {
+            InputMode::Suggesting { candidates, .. } | InputMode::Navigating { candidates, .. } => {
+                Some(candidates)
+            }
+            InputMode::Idle => None,
+        }
+    }
+
     /// Commit candidate `index` of the suggestions on the bar, highlighted or not, the way an
     /// accept key commits the highlighted one: only the word or identifier segment at the
     /// caret is replaced, with a trailing space unless the identifier goes on after it. A
@@ -1441,6 +1463,22 @@ mod tests {
         assert!(!is_swallowed(
             &sm.handle_key_press(KEY_TAB, None, false, &dict)
         ));
+    }
+
+    #[test]
+    fn test_number_keys_by_evdev_code() {
+        // Digits row: 1 is evdev 2, 9 is evdev 10; 0 picks nothing
+        assert_eq!(number_key_index(2), Some(0));
+        assert_eq!(number_key_index(6), Some(4));
+        assert_eq!(number_key_index(10), Some(8));
+        assert_eq!(number_key_index(11), None);
+        // Keypad 1, 4, 5 and 9
+        assert_eq!(number_key_index(79), Some(0));
+        assert_eq!(number_key_index(75), Some(3));
+        assert_eq!(number_key_index(76), Some(4));
+        assert_eq!(number_key_index(73), Some(8));
+        assert_eq!(number_key_index(74), None); // keypad minus
+        assert_eq!(number_key_index(16), None); // q
     }
 
     #[test]

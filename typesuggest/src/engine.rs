@@ -1,11 +1,11 @@
-use crate::config::{BarPosition, Config, ConfigSource};
+use crate::config::{BarPosition, Config, ConfigSource, NumberSelect};
 use crate::dict::{Dictionary, write_user_bigrams_file};
 use crate::security::{
     get_hyprland_active_window, get_hyprland_max_monitor_extent, has_sensitive_descendant,
     is_sensitive_window, is_session_locked,
 };
 use crate::shm::{BUFFER_SCALE, draw_pixmap_to_surface, hide_surface};
-use crate::state::{InputMode, KeyAction, StateMachine, is_modifier_keysym};
+use crate::state::{InputMode, KeyAction, StateMachine, is_modifier_keysym, number_key_index};
 use crate::theme::{OmarchyTheme, Palette, Theme};
 use crate::ui::{PillRect, Renderer};
 use std::os::fd::AsFd;
@@ -214,6 +214,8 @@ pub struct Engine {
     pub active: bool,
     pub active_serial: u32,
     pub keymap_sent_to_vk: bool,
+    /// The last modifiers (depressed, latched, locked, group) passed on to the virtual keyboard
+    pub vk_mods: (u32, u32, u32, u32),
     pub swallowed_keys: std::collections::HashSet<u32>,
     pub is_sensitive: bool,
     pub is_sensitive_wayland: bool,
@@ -306,6 +308,7 @@ impl Engine {
             active: false,
             active_serial: 0,
             keymap_sent_to_vk: false,
+            vk_mods: (0, 0, 0, 0),
             swallowed_keys: std::collections::HashSet::new(),
             is_sensitive: false,
             is_sensitive_wayland: false,
@@ -348,7 +351,9 @@ impl Engine {
     pub fn apply_config(&mut self, config: Config) {
         self.state_machine.apply_config(&config);
         self.renderer.bar_scale = config.bar_scale;
+        self.renderer.show_numbers = config.number_select != NumberSelect::Off;
         self.dict.set_typo_correction(config.typo_correction);
+        self.dict.set_filter_offensive(config.filter_offensive);
 
         // Read the learned phrases before learning starts, or the next save would overwrite
         // the file with only what was learned since
@@ -705,6 +710,13 @@ impl Engine {
         {
             im.delete_surrounding_text(deleted_before.len() as u32, deleted_after.len() as u32);
         } else if let Some(vk) = &self.vk {
+            // Ctrl or Alt held for number_select would turn the Backspaces into word deletions:
+            // release the held modifiers around them
+            let (depressed, latched, locked, group) = self.vk_mods;
+            let release_mods = depressed != 0 && self.keymap_sent_to_vk;
+            if release_mods {
+                vk.modifiers(0, latched, locked, group);
+            }
             // Terminals: Backspace (evdev 14) and Delete (evdev 111)
             for _ in deleted_before.chars() {
                 vk.key(time, 14, 1);
@@ -713,6 +725,9 @@ impl Engine {
             for _ in deleted_after.chars() {
                 vk.key(time, 111, 1);
                 vk.key(time, 111, 0);
+            }
+            if release_mods {
+                vk.modifiers(depressed, latched, locked, group);
             }
         }
 
@@ -1437,6 +1452,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                     && state.keymap_sent_to_vk
                 {
                     vk.modifiers(mods_depressed, mods_latched, mods_locked, group);
+                    state.vk_mods = (mods_depressed, mods_latched, mods_locked, group);
                 }
             }
 
@@ -1483,7 +1499,8 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                     let mut keysym_raw = 0u32;
                     let mut char_opt = None;
                     let mut ctrl_active = false;
-                    let mut alt_or_super = false;
+                    let mut alt_active = false;
+                    let mut super_active = false;
                     let mut shift_active = false;
 
                     if let Some(xkb_state) = &state.xkb_state {
@@ -1496,8 +1513,10 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         let active = |m| xkb_state.mod_name_is_active(m, xkb::STATE_MODS_EFFECTIVE);
                         ctrl_active = active(xkb::MOD_NAME_CTRL);
                         shift_active = active(xkb::MOD_NAME_SHIFT);
-                        alt_or_super = active(xkb::MOD_NAME_ALT) || active(xkb::MOD_NAME_LOGO);
+                        alt_active = active(xkb::MOD_NAME_ALT);
+                        super_active = active(xkb::MOD_NAME_LOGO);
                     }
+                    let alt_or_super = alt_active || super_active;
                     // Shift or Ctrl going down changes nothing the app reports
                     if !is_modifier_keysym(keysym_raw) {
                         state.last_key_at = Some(std::time::Instant::now());
@@ -1511,7 +1530,24 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
 
                     // Keys that cannot be swallowed go to the app before any slower work (window
                     // and process checks, dictionary lookups, drawing), so typing never waits on it
-                    if !state.state_machine.may_swallow(keysym_raw, ctrl_active) {
+                    // number_select: the modifier with 1 to 5 takes the suggestion with that number
+                    // on the bar
+                    let number_pick = number_key_index(key).filter(|&index| {
+                        state.config.number_select.is_held(
+                            ctrl_active,
+                            alt_active,
+                            shift_active,
+                            super_active,
+                        ) && state.is_popup_visible
+                            && state
+                                .state_machine
+                                .shown_candidates()
+                                .is_some_and(|shown| index < shown.len())
+                    });
+
+                    if number_pick.is_none()
+                        && !state.state_machine.may_swallow(keysym_raw, ctrl_active)
+                    {
                         forward!();
                         let _ = conn.flush();
                     }
@@ -1551,6 +1587,19 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         }
 
                         forward!();
+                        return;
+                    }
+
+                    // Only the word drawn with that number may be committed
+                    if let Some(index) = number_pick
+                        && state.is_popup_visible
+                        && state.last_drawn.as_ref().is_some_and(|(drawn, _)| {
+                            state.state_machine.shown_candidates() == Some(drawn.as_slice())
+                        })
+                        && let Some(commit) = state.state_machine.commit_candidate(index)
+                    {
+                        state.swallowed_keys.insert(key);
+                        state.commit_candidate(commit, time, conn);
                         return;
                     }
 

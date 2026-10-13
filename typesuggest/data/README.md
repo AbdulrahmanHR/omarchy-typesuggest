@@ -8,6 +8,7 @@ folder, which are also built into the `typesuggest` binary, keep their own licen
 | `en_50k.txt` | The 50,000 most frequent English words with counts | [FrequencyWords](https://github.com/hermitdave/FrequencyWords) by Hermit Dave, `content/2018/en/en_50k.txt`, built from [OpenSubtitles](https://www.opensubtitles.org) 2018 | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) |
 | `bigrams.tsv` | About 320,000 word pairs with counts | Built by [`build_bigrams.py`](build_bigrams.py) from the English sentences written by [Tatoeba](https://tatoeba.org) contributors (export of 2026-09-26) | [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/) |
 | `trigrams.tsv` | About 319,000 word triples with counts | Built by [`build_trigrams.py`](build_trigrams.py) from the same Tatoeba export | [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/) |
+| `blocked_words.txt` | About 150 profanity, sexual slang and slur words left out of suggestions while `filter_offensive` is on | Written for TypeSuggest | MIT, like the code |
 | `proper_nouns.txt` | About 15,000 names, places, languages and acronyms as they are written (John, London, English, FBI, iPhone) | Built by [`build_proper_nouns.py`](build_proper_nouns.py) from the en_US Hunspell dictionary of [SCOWL](https://wordlist.aspell.net) (2026.02.25) | SCOWL license, below |
 
 ## Changes

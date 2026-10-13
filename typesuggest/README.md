@@ -174,7 +174,7 @@ Hovering a suggestion highlights it. Before the select key (`Up` by default) the
 
 A click within a moment (0.3 s) of the bar appearing or changing its words is ignored, so the second click of a double click, or a click aimed at the text as the bar pops up, never takes a word. If the bar appears under a mouse that has not moved, move it slightly before clicking: Hyprland does not tell TypeSuggest where a still pointer is, so such a click takes no word (with the bar above the caret it hides the bar instead).
 
-The key that enters navigation (`select_key`, `Up` or `Down`), the keys that commit (`accept_keys`) and the space after the word (`trailing_space`) can be changed in the configuration. A key left out of `accept_keys` ends navigation and reaches the app as usual, so with `accept_keys = space, tab` Enter always sends your message. With `tab_accepts_first = true`, Tab takes the first suggestion straight away, no select key needed.
+The key that enters navigation (`select_key`, `Up` or `Down`), the keys that commit (`accept_keys`) and the space after the word (`trailing_space`) can be changed in the configuration. A key left out of `accept_keys` ends navigation and reaches the app as usual, so with `accept_keys = space, tab` Enter always sends your message. With `tab_accepts_first = true`, Tab takes the first suggestion straight away, no select key needed. With `number_select = "alt"` (or `"ctrl"`), each suggestion shows a small number, and holding that modifier while pressing the number takes it; with `"plain"` the number key alone does.
 
 ---
 
@@ -222,6 +222,10 @@ accept_keys = enter, space, tab
 # Tab takes the first suggestion without the select key (default: false)
 tab_accepts_first = false
 
+# Alt or Ctrl with 1 to 5 (or 1 to 5 alone, "plain") takes that suggestion; numbers show on
+# the bar (default: "off")
+number_select = "off"
+
 # Insert a space after the committed word (default: true)
 trailing_space = true
 
@@ -237,6 +241,9 @@ disabled_apps =
 
 # Suggest similar words for typos when nothing matches the typed prefix (default: true)
 typo_correction = true
+
+# Never suggest profanity, sexual slang or slurs (default: true)
+filter_offensive = true
 
 # Font for the suggestion bar: a family name or a .ttf/.otf path (default: "" = built-in choice)
 font = ""
@@ -254,11 +261,13 @@ font = ""
 | `select_key` | `"up"` | Arrow key that moves into the suggestions while they show: `"up"` or `"down"`. The other arrow then moves the caret as usual. In navigation, the other arrow or `Escape` goes back to the text, and the select key again stays in the bar. |
 | `accept_keys` | `enter, space, tab` | Keys that commit the highlighted suggestion. Any of `enter`, `space`, `tab`; also written as `["enter", "tab"]`. Other keys end navigation and reach the app. |
 | `tab_accepts_first` | `false` | Tab commits the first suggestion while the bar shows, without pressing the select key first. Once you are in navigation, Tab takes the highlighted word as usual. Tab reaches the app when no suggestions show. |
+| `number_select` | `"off"` | `"plain"`: press a suggestion's number to take it; while suggestions show, those digits no longer type (so "mp3" needs the bar dismissed first, e.g. with Escape). `"alt"` or `"ctrl"`: hold it and press a suggestion's number (digits row or keypad) to take that suggestion; each suggestion then shows its number. Only that modifier on its own counts, and only while the bar shows, so Ctrl+1 or Alt+1 reaches the app otherwise. With `"alt"`, an app that opens its menu on a lone Alt press (Firefox) may show its menu bar afterwards; `"ctrl"` avoids that. |
 | `trailing_space` | `true` | Add a space after the committed word. The accept key itself is still swallowed. |
 | `hover_highlight` | `true` | Highlight the suggestion under the mouse the way the keyboard selection is shown. A click takes the word under the mouse either way. |
 | `mouse_hides_bar` | `false` | Only with `bar_position = "above"`: hide the bar as soon as the mouse moves over the empty area above it, so a click there always reaches the text. Off, the bar stays until that area is clicked. |
 | `disabled_apps` | none | Window classes where TypeSuggest does nothing at all, e.g. `code, org.wezfurlong.wezterm` or `["code", "steam*"]`. Matching is case-insensitive and a trailing `*` matches any suffix. Find a window's class with `hyprctl activewindow`. |
 | `typo_correction` | `true` | When nothing starts with the typed letters, suggest similar words (`teh` -> `the`). |
+| `filter_offensive` | `true` | Never suggest the profanity, sexual slang and slurs in [`data/blocked_words.txt`](data/blocked_words.txt) (whole words and their possessives). A word you list in `words.txt` is suggested anyway. |
 | `font` | `""` | Empty uses Segoe UI (if installed under `~/.local/share/fonts/windows`), then Liberation Sans, then DejaVu Sans. A family name (e.g. `"Inter"`, or a fontconfig pattern like `"Inter:bold"`) is looked up with `fc-match`; a value containing `/` is a font file path (`~/` allowed). Fonts that cannot be loaded fall back to the default with a warning in the log. |
 
 Omarchy theme switches are picked up the same way, the next time a text field is focused. Command-line options (below) keep overriding the file after it is reloaded.

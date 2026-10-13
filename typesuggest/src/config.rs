@@ -26,6 +26,8 @@ pub struct Config {
     pub accept_keys: AcceptKeys,
     /// Tab commits the first suggestion while the bar shows, without the select key first
     pub tab_accepts_first: bool,
+    /// Modifier that, held with a number key, commits that suggestion; numbers show on the pills
+    pub number_select: NumberSelect,
     /// Append a space after a committed word
     pub trailing_space: bool,
     /// Highlight the suggestion under the mouse the way the keyboard selection is drawn
@@ -38,6 +40,8 @@ pub struct Config {
     pub disabled_apps: Vec<String>,
     /// Fall back to similar words when nothing starts with the typed prefix
     pub typo_correction: bool,
+    /// Never suggest profanity, sexual slang or slurs
+    pub filter_offensive: bool,
     /// Font file path or fontconfig family; empty for the built-in font chain
     pub font: String,
 }
@@ -124,6 +128,49 @@ impl SelectKey {
     }
 }
 
+/// The modifier that, held with 1 to 5, commits that suggestion (`number_select`). With
+/// `Plain` the number key alone does, so digits cannot be typed while the bar shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NumberSelect {
+    #[default]
+    Off,
+    Alt,
+    Ctrl,
+    Plain,
+}
+
+impl NumberSelect {
+    pub fn parse(val: &str) -> Option<Self> {
+        match val.trim().to_lowercase().as_str() {
+            "off" | "false" | "none" => Some(Self::Off),
+            "alt" => Some(Self::Alt),
+            "ctrl" | "control" => Some(Self::Ctrl),
+            "plain" | "number" => Some(Self::Plain),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Alt => "alt",
+            Self::Ctrl => "ctrl",
+            Self::Plain => "plain",
+        }
+    }
+
+    /// Whether exactly this modifier is held: Ctrl+Alt+1 or Shift+Alt+1 is another shortcut,
+    /// and `Plain` wants none at all
+    pub fn is_held(self, ctrl: bool, alt: bool, shift: bool, logo: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Alt => alt && !ctrl && !shift && !logo,
+            Self::Ctrl => ctrl && !alt && !shift && !logo,
+            Self::Plain => !ctrl && !alt && !shift && !logo,
+        }
+    }
+}
+
 /// Parse a suggestion bar size multiplier, clamped to the supported range
 pub fn parse_bar_scale(val: &str) -> Option<f32> {
     val.trim()
@@ -174,10 +221,12 @@ const SETTABLE_KEYS: &[(&str, &[&str])] = &[
     ("select_key", &[]),
     ("accept_keys", &[]),
     ("tab_accepts_first", &[]),
+    ("number_select", &[]),
     ("trailing_space", &[]),
     ("hover_highlight", &[]),
     ("mouse_hides_bar", &[]),
     ("typo_correction", &[]),
+    ("filter_offensive", &[]),
     ("disabled_apps", &[]),
     ("font", &[]),
 ];
@@ -205,7 +254,7 @@ pub fn config_line(key: &str, value: &str) -> Result<String, String> {
 
     let stored = match key {
         "learn" | "tab_accepts_first" | "trailing_space" | "typo_correction"
-        | "hover_highlight" | "mouse_hides_bar" => parse_bool()?.to_string(),
+        | "filter_offensive" | "hover_highlight" | "mouse_hides_bar" => parse_bool()?.to_string(),
         "min_prefix_length" | "max_candidates" => {
             let max = if key == "max_candidates" { 5 } else { 10 };
             let n = value.parse::<usize>().map_err(|_| invalid())?;
@@ -226,6 +275,11 @@ pub fn config_line(key: &str, value: &str) -> Result<String, String> {
         }
         "bar_position" => quoted(BarPosition::parse(value).ok_or_else(invalid)?.name())?,
         "theme" => quoted(Theme::parse(value).ok_or_else(invalid)?.name())?,
+        "number_select" => quoted(
+            NumberSelect::parse(value)
+                .ok_or_else(|| "number_select takes off, alt, ctrl or plain".to_string())?
+                .name(),
+        )?,
         "select_key" => quoted(
             SelectKey::parse(value)
                 .ok_or_else(|| "select_key takes up or down".to_string())?
@@ -345,11 +399,13 @@ impl Default for Config {
             select_key: SelectKey::Up,
             accept_keys: AcceptKeys::default(),
             tab_accepts_first: false,
+            number_select: NumberSelect::Off,
             trailing_space: true,
             hover_highlight: true,
             mouse_hides_bar: false,
             disabled_apps: Vec::new(),
             typo_correction: true,
+            filter_offensive: true,
             font: String::new(),
         }
     }
@@ -456,6 +512,11 @@ impl Config {
                             self.tab_accepts_first = b;
                         }
                     }
+                    "number_select" => {
+                        if let Some(modifier) = NumberSelect::parse(val) {
+                            self.number_select = modifier;
+                        }
+                    }
                     "trailing_space" => {
                         if let Ok(b) = val.parse::<bool>() {
                             self.trailing_space = b;
@@ -482,6 +543,11 @@ impl Config {
                             self.typo_correction = b;
                         }
                     }
+                    "filter_offensive" => {
+                        if let Ok(b) = val.parse::<bool>() {
+                            self.filter_offensive = b;
+                        }
+                    }
                     "font" => {
                         self.font = val.to_string();
                     }
@@ -506,7 +572,7 @@ impl Config {
         };
         let apps: Vec<&str> = self.disabled_apps.iter().map(String::as_str).collect();
         format!(
-            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"tab_accepts_first\":{},\"trailing_space\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"disabled_apps\":{},\"font\":{}}}",
+            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"tab_accepts_first\":{},\"number_select\":{},\"trailing_space\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"filter_offensive\":{},\"disabled_apps\":{},\"font\":{}}}",
             self.learn,
             self.min_prefix_length,
             self.max_candidates,
@@ -516,10 +582,12 @@ impl Config {
             json_string(self.select_key.name()),
             list(&self.accept_keys.names()),
             self.tab_accepts_first,
+            json_string(self.number_select.name()),
             self.trailing_space,
             self.hover_highlight,
             self.mouse_hides_bar,
             self.typo_correction,
+            self.filter_offensive,
             list(&apps),
             json_string(&self.font),
         )
@@ -582,6 +650,11 @@ accept_keys = enter, space, tab
 # (default: false). Tab still reaches the app when no suggestions are showing.
 tab_accepts_first = false
 
+# Hold this modifier and press 1 to 5 to take that suggestion straight away (default: "off"):
+# "off", "alt", "ctrl", or "plain" for the number key alone (digits then cannot be typed
+# while suggestions show). While on, each suggestion shows its number.
+number_select = "off"
+
 # Insert a space after the committed word (default: true)
 trailing_space = true
 
@@ -600,6 +673,10 @@ disabled_apps =
 
 # Suggest similar words for typos when nothing matches the typed prefix (default: true)
 typo_correction = true
+
+# Never suggest profanity, sexual slang or slurs (default: true). A word you list in words.txt
+# is suggested anyway.
+filter_offensive = true
 
 # Font for the suggestion bar (default: "" = Segoe UI, Liberation Sans or DejaVu Sans)
 # Either a font family name such as "Inter" or a path to a .ttf/.otf file
@@ -718,9 +795,11 @@ mod tests {
         assert!(!cfg.mouse_hides_bar);
         assert_eq!(cfg.accept_keys, AcceptKeys::default());
         assert!(!cfg.tab_accepts_first);
+        assert_eq!(cfg.number_select, NumberSelect::Off);
         assert!(cfg.trailing_space);
         assert!(cfg.disabled_apps.is_empty());
         assert!(cfg.typo_correction);
+        assert!(cfg.filter_offensive);
         assert_eq!(cfg.font, "");
     }
 
@@ -746,9 +825,11 @@ mod tests {
             color_text = "not a color"
             trailing_space = false
             tab_accepts_first = true
+            number_select = "Ctrl"
             hover_highlight = false
             mouse_hides_bar = true
             typo_correction = false
+            filter_offensive = false
             font = "JetBrains Mono"
         "##;
         cfg.parse_str(content);
@@ -762,9 +843,11 @@ mod tests {
         assert_eq!(cfg.colors.text, None);
         assert!(!cfg.trailing_space);
         assert!(cfg.tab_accepts_first);
+        assert_eq!(cfg.number_select, NumberSelect::Ctrl);
         assert!(!cfg.hover_highlight);
         assert!(cfg.mouse_hides_bar);
         assert!(!cfg.typo_correction);
+        assert!(!cfg.filter_offensive);
         assert_eq!(cfg.font, "JetBrains Mono");
     }
 
@@ -817,6 +900,15 @@ mod tests {
         assert_eq!(
             config_line("tab_accepts_first", "on").unwrap(),
             "tab_accepts_first = true"
+        );
+        assert_eq!(
+            config_line("number_select", "Alt").unwrap(),
+            "number_select = \"alt\""
+        );
+        assert!(config_line("number_select", "shift").is_err());
+        assert_eq!(
+            config_line("filter_offensive", "off").unwrap(),
+            "filter_offensive = false"
         );
         assert_eq!(
             config_line("mouse_hides_bar", "yes").unwrap(),
@@ -881,6 +973,8 @@ mod tests {
         assert!(
             json.contains("\"select_key\":\"up\",\"accept_keys\":[\"enter\",\"space\",\"tab\"]")
         );
+        assert!(json.contains("\"tab_accepts_first\":false,\"number_select\":\"off\""));
+        assert!(json.contains("\"typo_correction\":true,\"filter_offensive\":true"));
         assert!(json.contains("\"disabled_apps\":[\"code\"]"));
         assert!(json.contains("\"hover_highlight\":true,\"mouse_hides_bar\":false"));
         assert!(json.ends_with("\"font\":\"My \\\"Font\\\"\"}"));
@@ -900,6 +994,38 @@ mod tests {
         );
         cfg.parse_str("position = below\n");
         assert_eq!(cfg.bar_position, BarPosition::Below);
+    }
+
+    #[test]
+    fn test_number_select() {
+        let mut cfg = Config::default();
+        cfg.parse_str("number_select = alt\n");
+        assert_eq!(cfg.number_select, NumberSelect::Alt);
+        cfg.parse_str("number_select = super\n");
+        assert_eq!(
+            cfg.number_select,
+            NumberSelect::Alt,
+            "invalid values are ignored"
+        );
+        cfg.parse_str("number_select = \"off\"\n");
+        assert_eq!(cfg.number_select, NumberSelect::Off);
+
+        // Only the chosen modifier on its own picks a suggestion
+        assert!(NumberSelect::Alt.is_held(false, true, false, false));
+        assert!(!NumberSelect::Alt.is_held(true, true, false, false));
+        assert!(!NumberSelect::Alt.is_held(false, true, true, false));
+        assert!(NumberSelect::Ctrl.is_held(true, false, false, false));
+        assert!(!NumberSelect::Ctrl.is_held(true, false, false, true));
+        assert!(!NumberSelect::Off.is_held(true, true, false, false));
+        assert!(NumberSelect::Plain.is_held(false, false, false, false));
+        assert!(
+            !NumberSelect::Plain.is_held(false, false, true, false),
+            "Shift+1 types !"
+        );
+        assert!(!NumberSelect::Plain.is_held(true, false, false, false));
+        assert!(!NumberSelect::Off.is_held(false, false, false, false));
+        cfg.parse_str("number_select = plain\n");
+        assert_eq!(cfg.number_select, NumberSelect::Plain);
     }
 
     #[test]

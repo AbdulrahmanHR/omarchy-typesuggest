@@ -253,6 +253,8 @@ fn print_help() {
         "    tab_accepts_first = true | false Tab takes the first word without the select key"
     );
     println!("                                     (false)");
+    println!("    number_select = off | alt | ctrl Modifier + 1 to 5 takes that suggestion (off)");
+    println!("                    | plain          ...or the number key alone");
     println!("    trailing_space = true | false    Add a space after the committed word (true)");
     println!(
         "    hover_highlight = true | false   Highlight the suggestion under the mouse (true)"
@@ -263,6 +265,7 @@ fn print_help() {
         "    disabled_apps = code, steam*     Window classes where typesuggest stays off (none)"
     );
     println!("    typo_correction = true | false   Suggest similar words for typos (true)");
+    println!("    filter_offensive = true | false  Never suggest profanity or slurs (true)");
     println!(
         "    font = \"Inter\"                   Font family or .ttf/.otf path (\"\": built-in)"
     );
@@ -281,6 +284,8 @@ fn print_help() {
     );
     println!("      (swallowing the key); any other key leaves navigation and reaches the app");
     println!("    - With tab_accepts_first, Tab takes the first suggestion without the arrow key");
+    println!("    - With number_select, Alt or Ctrl (or nothing, with plain) and the number shown");
+    println!("      on a suggestion takes it");
     println!("    - Or click a suggestion with the left mouse button to commit it straight away;");
     println!("      the one under the mouse is highlighted (hover_highlight)");
 }
@@ -565,6 +570,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "off"
         }
     );
+    println!("  - Number select: {}", config.number_select.name());
     println!(
         "  - Trailing space: {}",
         if config.trailing_space { "on" } else { "off" }
@@ -584,6 +590,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             "disabled"
         }
+    );
+    println!(
+        "  - Offensive word filter: {}",
+        if config.filter_offensive { "on" } else { "off" }
     );
     if !config.disabled_apps.is_empty() {
         println!("  - Disabled apps: {}", config.disabled_apps.join(", "));
@@ -610,6 +620,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 && trimmed.chars().all(|c| c.is_alphabetic() || c == '\'')
             {
                 dict.insert(&trimmed.to_lowercase(), 50_000_000); // High frequency for custom words
+                // Listed on purpose, so the offensive word filter lets it through
+                dict.allow_word(trimmed);
                 // A name listed with capitals is suggested with them
                 dict.set_spelling(trimmed);
                 user_word_count += 1;

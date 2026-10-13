@@ -67,6 +67,10 @@ pub struct Dictionary {
     learn_enabled: bool,
     // Fall back to similar words (typo correction) when no word starts with the prefix
     typo_correction: bool,
+    // Profanity, sexual slang and slurs (data/blocked_words.txt), never suggested while
+    // `filter_offensive` is on
+    blocked: HashSet<String>,
+    filter_offensive: bool,
     ranking: Ranking,
 }
 
@@ -177,6 +181,8 @@ impl Dictionary {
             names_only: HashSet::new(),
             learn_enabled: true,
             typo_correction: true,
+            blocked: HashSet::new(),
+            filter_offensive: true,
             ranking: Ranking::default(),
         }
     }
@@ -196,6 +202,35 @@ impl Dictionary {
 
     pub fn set_typo_correction(&mut self, enabled: bool) {
         self.typo_correction = enabled;
+    }
+
+    /// Leave the words in the blocked list out of suggestions (true) or offer them (false)
+    pub fn set_filter_offensive(&mut self, enabled: bool) {
+        self.filter_offensive = enabled;
+    }
+
+    /// Add the words of a blocked-words list: one lowercase word per line, `#` comments
+    pub fn load_blocked_words(&mut self, text: &str) {
+        for line in text.lines() {
+            let word = line.trim();
+            if !word.is_empty() && !word.starts_with('#') {
+                self.blocked.insert(word.to_lowercase());
+            }
+        }
+    }
+
+    /// Suggest `word` even while offensive words are filtered: the user listed it themselves
+    pub fn allow_word(&mut self, word: &str) {
+        self.blocked.remove(&word.to_lowercase());
+    }
+
+    /// Whether `word` (lowercase) is kept out of suggestions, its possessive included
+    fn is_blocked(&self, word: &str) -> bool {
+        self.filter_offensive
+            && (self.blocked.contains(word)
+                || word
+                    .strip_suffix("'s")
+                    .is_some_and(|base| self.blocked.contains(base)))
     }
 
     /// Load names and other words always written with capitals, one per line as they are
@@ -247,6 +282,7 @@ impl Dictionary {
         dict.add_english_contractions();
         // Names, places and acronyms are suggested with their capitals ("London", "FBI")
         dict.load_proper_nouns(include_str!("../data/proper_nouns.txt"));
+        dict.load_blocked_words(include_str!("../data/blocked_words.txt"));
         dict
     }
 
@@ -736,6 +772,7 @@ impl Dictionary {
         };
         let mut ranked: Vec<(f64, &String)> = evidence
             .iter()
+            .filter(|(word, _)| !self.is_blocked(word))
             .filter(|(word, _)| {
                 *word != &lower_prefix
                     || spelling(word)
@@ -762,7 +799,7 @@ impl Dictionary {
             && lower_prefix.chars().any(|c| c.is_ascii_alphabetic())
         {
             for cand in self.suggest_similar(&lower_prefix, ctx, limit) {
-                if cand != lower_prefix && !results.contains(&cand) {
+                if cand != lower_prefix && !results.contains(&cand) && !self.is_blocked(&cand) {
                     results.push(cand);
                     if results.len() >= limit {
                         break;
@@ -1624,6 +1661,48 @@ mod tests {
 
         let res_all_caps = dict.suggest("TEH", &Context::default(), 1);
         assert_eq!(res_all_caps, vec!["THE"]);
+    }
+
+    #[test]
+    fn test_offensive_words_are_filtered() {
+        let text = "shirt 900\nshit 5000\nshitty 800\nshine 700\ncocktail 600\ncock 650";
+        let mut dict = Dictionary::from_frequency_text(text);
+        dict.load_blocked_words("# comment\nshit\nshitty\ncock\n");
+        let ctx = Context::default();
+        assert_eq!(dict.suggest("sh", &ctx, 5), vec!["shirt", "shine"]);
+        // Whole words only, and possessives follow their word
+        assert_eq!(dict.suggest("coc", &ctx, 5), vec!["cocktail"]);
+        assert!(dict.is_blocked("shit's"));
+        // Typo fallback: "shitt" is closest to the blocked words
+        assert!(
+            dict.suggest("shitt", &ctx, 5)
+                .iter()
+                .all(|w| !dict.is_blocked(w))
+        );
+
+        dict.set_filter_offensive(false);
+        assert_eq!(dict.suggest("sh", &ctx, 2), vec!["shit", "shirt"]);
+
+        // A word the user listed in words.txt is suggested anyway
+        dict.set_filter_offensive(true);
+        dict.allow_word("Shit");
+        assert_eq!(dict.suggest("sh", &ctx, 1), vec!["shit"]);
+    }
+
+    #[test]
+    fn test_embedded_blocklist_covers_the_vocabulary() {
+        let dict = Dictionary::embedded();
+        let ctx = Context::default();
+        for prefix in ["fu", "fuc", "sh", "bi", "nig", "fag", "cun"] {
+            let shown = dict.suggest(prefix, &ctx, 5);
+            assert!(
+                shown.iter().all(|w| !dict.is_blocked(&w.to_lowercase())),
+                "{prefix:?} -> {shown:?}"
+            );
+        }
+        assert!(dict.is_blocked("fucking"));
+        assert!(!dict.is_blocked("assume"));
+        assert!(!dict.is_blocked("cocktail"));
     }
 
     #[test]

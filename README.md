@@ -124,7 +124,7 @@ panel.
 | Which build is it, and does it support the settings? | `typesuggest --help` (its first line names the version), each time the panel opens |
 | Is it on? | `systemctl --user is-active typesuggest` |
 | Read the settings | `typesuggest --config-json` |
-| Change a setting | `typesuggest --set <key> <value>` with `bar_position`, `bar_scale`, `max_candidates`, `select_key`, `accept_keys`, `tab_accepts_first`, `learn`, `typo_correction`, `hover_highlight`, `mouse_hides_bar` or `theme` |
+| Change a setting | `typesuggest --set <key> <value>` with `bar_position`, `bar_scale`, `max_candidates`, `select_key`, `accept_keys`, `tab_accepts_first`, `number_select`, `learn`, `typo_correction`, `filter_offensive`, `hover_highlight`, `mouse_hides_bar` or `theme` |
 | Turn on | `typesuggest --enable-autostart`, then `systemctl --user start typesuggest` |
 | Turn off | `systemctl --user stop typesuggest`, then `typesuggest --disable-autostart` |
 | Clear learned phrases | `typesuggest --clear-learned` (TypeSuggest restarts its service so the daemon forgets them too) |

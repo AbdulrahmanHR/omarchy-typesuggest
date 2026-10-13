@@ -26,8 +26,10 @@ Panel {
   //   count          1 to 5 suggestions
   //   select         Down, Up (only when typesuggest reports select_key)
   //   keys           Enter, Space, Tab
+  //   number         Off, Alt, Ctrl, Alone (when typesuggest reports number_select)
   //   tabfirst       switch row (when typesuggest reports tab_accepts_first)
   //   learn, typo    switch rows
+  //   offensive      switch row (when typesuggest reports filter_offensive)
   //   hover          switch row (when typesuggest reports hover_highlight)
   //   mousehide      switch row (likewise, and only with the bar above the caret)
   //   clear, config  action rows
@@ -101,6 +103,10 @@ Panel {
     && typeof root.config.mouse_hides_bar === "boolean"
   // Older typesuggest builds (before tab_accepts_first) report nothing for it
   readonly property bool tabFirstSupported: typeof root.config.tab_accepts_first === "boolean"
+  // Likewise for number_select
+  readonly property bool numberSelectSupported: typeof root.config.number_select === "string"
+  // Likewise for filter_offensive
+  readonly property bool offensiveFilterSupported: typeof root.config.filter_offensive === "boolean"
   readonly property bool showMouseHidesBar: mouseSettingsSupported && root.config.bar_position === "above"
 
   readonly property var sections: {
@@ -111,8 +117,10 @@ Panel {
       list = list.concat(["look", "size", "count"])
       if (selectKeySupported) list.push("select")
       list.push("keys")
+      if (numberSelectSupported) list.push("number")
       if (tabFirstSupported) list.push("tabfirst")
       list = list.concat(["learn", "typo"])
+      if (offensiveFilterSupported) list.push("offensive")
       if (mouseSettingsSupported) list.push("hover")
       if (showMouseHidesBar) list.push("mousehide")
     }
@@ -126,6 +134,7 @@ Panel {
     if (section === "count") return 5
     if (section === "select") return 2
     if (section === "keys") return 3
+    if (section === "number") return 4
     return 1
   }
 
@@ -134,6 +143,7 @@ Panel {
     if (section === "look") return root.config.bar_position === "above" ? 1 : 0
     if (section === "count") return Math.max(0, Math.min(4, root.config.max_candidates - 1))
     if (section === "select") return root.config.select_key === "up" ? 1 : 0
+    if (section === "number") return Math.max(0, Model.numberSelects().indexOf(root.config.number_select))
     return 0
   }
 
@@ -188,9 +198,11 @@ Panel {
     else if (focusSection === "count") typesuggest.setOption("max_candidates", i + 1)
     else if (focusSection === "select") typesuggest.setOption("select_key", Model.selectKeys()[i])
     else if (focusSection === "keys") typesuggest.toggleAcceptKey(Model.acceptKeyNames()[i])
+    else if (focusSection === "number") typesuggest.setOption("number_select", Model.numberSelects()[i])
     else if (focusSection === "tabfirst") typesuggest.setOption("tab_accepts_first", !root.config.tab_accepts_first)
     else if (focusSection === "learn") typesuggest.setOption("learn", !root.config.learn)
     else if (focusSection === "typo") typesuggest.setOption("typo_correction", !root.config.typo_correction)
+    else if (focusSection === "offensive") typesuggest.setOption("filter_offensive", !root.config.filter_offensive)
     else if (focusSection === "hover") typesuggest.setOption("hover_highlight", !root.config.hover_highlight)
     else if (focusSection === "mousehide") typesuggest.setOption("mouse_hides_bar", !root.config.mouse_hides_bar)
     else if (focusSection === "clear") openClearConfirm()
@@ -592,6 +604,21 @@ Panel {
             onChosen: function(value) { typesuggest.toggleAcceptKey(value) }
           }
 
+          ChoiceGroup {
+            visible: root.settingsReady && root.numberSelectSupported
+            width: parent.width
+            title: "NUMBER KEYS"
+            section: "number"
+            options: [
+              { value: "off", label: "Off" },
+              { value: "alt", label: "Alt" },
+              { value: "ctrl", label: "Ctrl" },
+              { value: "plain", label: "Alone" }
+            ]
+            activeValues: [root.config.number_select]
+            onChosen: function(value) { typesuggest.setOption("number_select", value) }
+          }
+
           // How to take a suggestion and how the two key rows fit together, since nothing on
           // the bar itself says so
           Text {
@@ -603,6 +630,12 @@ Panel {
               + root.selectKeyLabel
               + " to highlight one, Left/Right to choose, then an accept key. " + root.backKeyLabel
               + " or Esc goes back to the text."
+              + (root.config.number_select === "alt" || root.config.number_select === "ctrl"
+                ? " Or hold " + (root.config.number_select === "alt" ? "Alt" : "Ctrl")
+                  + " and press the number shown on a suggestion."
+                : root.config.number_select === "plain"
+                ? " Or press the number shown on a suggestion; digits type only when no suggestions show."
+                : "")
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -646,6 +679,16 @@ Panel {
               caption: "Suggest close words when nothing matches"
               checked: root.config.typo_correction
               onToggled: typesuggest.setOption("typo_correction", !root.config.typo_correction)
+            }
+
+            SwitchRow {
+              visible: root.offensiveFilterSupported
+              width: parent.width
+              section: "offensive"
+              title: "Hide offensive words"
+              caption: "Never suggest profanity or slurs"
+              checked: root.config.filter_offensive === true
+              onToggled: typesuggest.setOption("filter_offensive", !root.config.filter_offensive)
             }
 
             SwitchRow {
