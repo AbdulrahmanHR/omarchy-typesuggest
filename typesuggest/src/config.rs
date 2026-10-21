@@ -30,6 +30,8 @@ pub struct Config {
     pub number_select: NumberSelect,
     /// Append a space after a committed word
     pub trailing_space: bool,
+    /// Offer the likely next word after a space, before any letter of it is typed
+    pub predict_next_word: bool,
     /// Highlight the suggestion under the mouse the way the keyboard selection is drawn
     pub hover_highlight: bool,
     /// With `bar_position = "above"`: hide the bar as soon as the mouse moves over the empty
@@ -223,6 +225,7 @@ const SETTABLE_KEYS: &[(&str, &[&str])] = &[
     ("tab_accepts_first", &[]),
     ("number_select", &[]),
     ("trailing_space", &[]),
+    ("predict_next_word", &[]),
     ("hover_highlight", &[]),
     ("mouse_hides_bar", &[]),
     ("typo_correction", &[]),
@@ -253,8 +256,10 @@ pub fn config_line(key: &str, value: &str) -> Result<String, String> {
     };
 
     let stored = match key {
-        "learn" | "tab_accepts_first" | "trailing_space" | "typo_correction"
-        | "filter_offensive" | "hover_highlight" | "mouse_hides_bar" => parse_bool()?.to_string(),
+        "learn" | "tab_accepts_first" | "trailing_space" | "predict_next_word"
+        | "typo_correction" | "filter_offensive" | "hover_highlight" | "mouse_hides_bar" => {
+            parse_bool()?.to_string()
+        }
         "min_prefix_length" | "max_candidates" => {
             let max = if key == "max_candidates" { 5 } else { 10 };
             let n = value.parse::<usize>().map_err(|_| invalid())?;
@@ -401,6 +406,7 @@ impl Default for Config {
             tab_accepts_first: false,
             number_select: NumberSelect::Off,
             trailing_space: true,
+            predict_next_word: false,
             hover_highlight: true,
             mouse_hides_bar: false,
             disabled_apps: Vec::new(),
@@ -522,6 +528,11 @@ impl Config {
                             self.trailing_space = b;
                         }
                     }
+                    "predict_next_word" => {
+                        if let Ok(b) = val.parse::<bool>() {
+                            self.predict_next_word = b;
+                        }
+                    }
                     "hover_highlight" => {
                         if let Ok(b) = val.parse::<bool>() {
                             self.hover_highlight = b;
@@ -572,7 +583,7 @@ impl Config {
         };
         let apps: Vec<&str> = self.disabled_apps.iter().map(String::as_str).collect();
         format!(
-            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"tab_accepts_first\":{},\"number_select\":{},\"trailing_space\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"filter_offensive\":{},\"disabled_apps\":{},\"font\":{}}}",
+            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"tab_accepts_first\":{},\"number_select\":{},\"trailing_space\":{},\"predict_next_word\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"filter_offensive\":{},\"disabled_apps\":{},\"font\":{}}}",
             self.learn,
             self.min_prefix_length,
             self.max_candidates,
@@ -584,6 +595,7 @@ impl Config {
             self.tab_accepts_first,
             json_string(self.number_select.name()),
             self.trailing_space,
+            self.predict_next_word,
             self.hover_highlight,
             self.mouse_hides_bar,
             self.typo_correction,
@@ -657,6 +669,10 @@ number_select = "off"
 
 # Insert a space after the committed word (default: true)
 trailing_space = true
+
+# Suggest the next word after a space, before you type any letter of it (default: false).
+# Only words that usually follow the word before are offered; Tab never takes one.
+predict_next_word = false
 
 # Highlight the suggestion under the mouse, the way the keyboard selection is shown
 # (default: true). A click takes the word under the mouse either way.
@@ -797,6 +813,7 @@ mod tests {
         assert!(!cfg.tab_accepts_first);
         assert_eq!(cfg.number_select, NumberSelect::Off);
         assert!(cfg.trailing_space);
+        assert!(!cfg.predict_next_word);
         assert!(cfg.disabled_apps.is_empty());
         assert!(cfg.typo_correction);
         assert!(cfg.filter_offensive);
@@ -825,6 +842,7 @@ mod tests {
             color_text = "not a color"
             trailing_space = false
             tab_accepts_first = true
+            predict_next_word = true
             number_select = "Ctrl"
             hover_highlight = false
             mouse_hides_bar = true
@@ -843,6 +861,7 @@ mod tests {
         assert_eq!(cfg.colors.text, None);
         assert!(!cfg.trailing_space);
         assert!(cfg.tab_accepts_first);
+        assert!(cfg.predict_next_word);
         assert_eq!(cfg.number_select, NumberSelect::Ctrl);
         assert!(!cfg.hover_highlight);
         assert!(cfg.mouse_hides_bar);
@@ -906,6 +925,10 @@ mod tests {
             "number_select = \"alt\""
         );
         assert!(config_line("number_select", "shift").is_err());
+        assert_eq!(
+            config_line("predict_next_word", "on").unwrap(),
+            "predict_next_word = true"
+        );
         assert_eq!(
             config_line("filter_offensive", "off").unwrap(),
             "filter_offensive = false"
@@ -975,6 +998,7 @@ mod tests {
         );
         assert!(json.contains("\"tab_accepts_first\":false,\"number_select\":\"off\""));
         assert!(json.contains("\"typo_correction\":true,\"filter_offensive\":true"));
+        assert!(json.contains("\"trailing_space\":true,\"predict_next_word\":false"));
         assert!(json.contains("\"disabled_apps\":[\"code\"]"));
         assert!(json.contains("\"hover_highlight\":true,\"mouse_hides_bar\":false"));
         assert!(json.ends_with("\"font\":\"My \\\"Font\\\"\"}"));

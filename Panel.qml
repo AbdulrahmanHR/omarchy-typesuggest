@@ -28,6 +28,7 @@ Panel {
   //   keys           Enter, Space, Tab
   //   number         Off, Alt, Ctrl, Alone (when typesuggest reports number_select)
   //   tabfirst       switch row (when typesuggest reports tab_accepts_first)
+  //   predict        switch row (when typesuggest reports predict_next_word)
   //   learn, typo    switch rows
   //   offensive      switch row (when typesuggest reports filter_offensive)
   //   hover          switch row (when typesuggest reports hover_highlight)
@@ -103,6 +104,8 @@ Panel {
     && typeof root.config.mouse_hides_bar === "boolean"
   // Older typesuggest builds (before tab_accepts_first) report nothing for it
   readonly property bool tabFirstSupported: typeof root.config.tab_accepts_first === "boolean"
+  // Likewise for predict_next_word
+  readonly property bool predictSupported: typeof root.config.predict_next_word === "boolean"
   // Likewise for number_select
   readonly property bool numberSelectSupported: typeof root.config.number_select === "string"
   // Likewise for filter_offensive
@@ -119,6 +122,7 @@ Panel {
       list.push("keys")
       if (numberSelectSupported) list.push("number")
       if (tabFirstSupported) list.push("tabfirst")
+      if (predictSupported) list.push("predict")
       list = list.concat(["learn", "typo"])
       if (offensiveFilterSupported) list.push("offensive")
       if (mouseSettingsSupported) list.push("hover")
@@ -200,6 +204,7 @@ Panel {
     else if (focusSection === "keys") typesuggest.toggleAcceptKey(Model.acceptKeyNames()[i])
     else if (focusSection === "number") typesuggest.setOption("number_select", Model.numberSelects()[i])
     else if (focusSection === "tabfirst") typesuggest.setOption("tab_accepts_first", !root.config.tab_accepts_first)
+    else if (focusSection === "predict") typesuggest.setOption("predict_next_word", !root.config.predict_next_word)
     else if (focusSection === "learn") typesuggest.setOption("learn", !root.config.learn)
     else if (focusSection === "typo") typesuggest.setOption("typo_correction", !root.config.typo_correction)
     else if (focusSection === "offensive") typesuggest.setOption("filter_offensive", !root.config.filter_offensive)
@@ -661,6 +666,16 @@ Panel {
               caption: "Tab commits the first suggestion without " + root.selectKeyLabel
               checked: root.config.tab_accepts_first === true
               onToggled: typesuggest.setOption("tab_accepts_first", !root.config.tab_accepts_first)
+            }
+
+            SwitchRow {
+              visible: root.predictSupported
+              width: parent.width
+              section: "predict"
+              title: "Next word"
+              caption: "Suggest the next word before you type it"
+              checked: root.config.predict_next_word === true
+              onToggled: typesuggest.setOption("predict_next_word", !root.config.predict_next_word)
             }
 
             SwitchRow {

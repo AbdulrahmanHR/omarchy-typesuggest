@@ -11,6 +11,8 @@ Writes:
   outdir/bigrams.tsv, outdir/trigrams.tsv   tables from the train half
   outdir/cases_prefix{N}.tsv               eval cases at several prefix lengths
     each line: prev<TAB>prev_prev<TAB>prefix<TAB>target
+    prefix length 0 is next-word prediction: the prefix column is empty and
+    the model must suggest the word before any letter of it is typed.
 """
 
 import bz2
@@ -27,7 +29,7 @@ from build_bigrams import MIN_COUNT as BI_MIN_COUNT, MAX_FOLLOWERS as BI_MAX_FOL
 
 WORD = re.compile(r"[a-z]+(?:'[a-z]+)?")
 EVAL_PERCENT = 10
-PREFIX_LENGTHS = (1, 3)
+PREFIX_LENGTHS = (0, 1, 3)
 
 
 def is_eval(sentence_id):

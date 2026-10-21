@@ -95,6 +95,13 @@ pub struct Ranking {
     /// Learned phrases are counted in single digits, not the millions the corpus
     /// reaches, so they cannot be turned into a probability and get a flat priority.
     pub learned_bonus: f64,
+    /// The three weights for a prediction, before any letter of the word is typed.
+    /// With no prefix to narrow the candidates, the longest context is the best
+    /// evidence and carries more of the estimate (measured with
+    /// `examples/ranking_eval.rs` at prefix length 0).
+    pub prediction_unigram: f64,
+    pub prediction_bigram: f64,
+    pub prediction_trigram: f64,
 }
 
 impl Default for Ranking {
@@ -105,6 +112,9 @@ impl Default for Ranking {
             trigram: 0.45,
             prefix_weight: 0.8,
             learned_bonus: 1.0,
+            prediction_unigram: 0.10,
+            prediction_bigram: 0.20,
+            prediction_trigram: 0.70,
         }
     }
 }
@@ -702,10 +712,18 @@ impl Dictionary {
         self.suggest_with(prefix, ctx, limit, true)
     }
 
+    /// The words most likely to come next after the words in `ctx`, before any letter of it is
+    /// typed. Only words the context tables or the learned phrases expect there are offered:
+    /// without a word before the caret, or one the tables know nothing about, there are none.
+    pub fn predict_next(&self, ctx: &Context, limit: usize) -> Vec<String> {
+        self.suggest_with("", ctx, limit, true)
+    }
+
     /// [`Dictionary::suggest`] for a word (`whole_word` true) or for a later segment of an
     /// identifier ("Prog" in "myProg", "john" in "get_john"). A segment gets no typo fallback
     /// for a prefix no word starts with (the fallback also stays out while typo correction is
-    /// turned off), and is never spelled as a name: its case is the identifier's.
+    /// turned off), and is never spelled as a name: its case is the identifier's. An empty
+    /// prefix predicts the next word from the context alone (see [`Dictionary::predict_next`]).
     pub fn suggest_with(
         &self,
         prefix: &str,
@@ -713,7 +731,7 @@ impl Dictionary {
         limit: usize,
         whole_word: bool,
     ) -> Vec<String> {
-        if prefix.is_empty() {
+        if prefix.is_empty() && ctx.prev.is_none() {
             return Vec::new();
         }
 
@@ -755,10 +773,14 @@ impl Dictionary {
         }
 
         // 2. The most frequent words for the prefix, which is the whole vocabulary
-        //    when there is no context to condition on
-        let unigram_pool = self.suggest_unigram(&lower_prefix, UNIGRAM_POOL);
-        for cand in &unigram_pool {
-            evidence.entry(cand.clone()).or_default();
+        //    when there is no context to condition on. A prediction with no prefix takes
+        //    only the words the context expects: the most frequent words of English ("the",
+        //    "of") are no guess at what comes next.
+        if !lower_prefix.is_empty() {
+            let unigram_pool = self.suggest_unigram(&lower_prefix, UNIGRAM_POOL);
+            for cand in &unigram_pool {
+                evidence.entry(cand.clone()).or_default();
+            }
         }
 
         // 3. Score them all together and keep the best. The word already typed is no
@@ -826,29 +848,39 @@ impl Dictionary {
     fn score(&self, word: &str, prefix: &str, ctx: &Context, ev: Evidence) -> f64 {
         let mut weighted = 0.0;
         let mut weight = 0.0;
+        let r = &self.ranking;
+        let (unigram_weight, bigram_weight, trigram_weight) = if prefix.is_empty() {
+            (
+                r.prediction_unigram,
+                r.prediction_bigram,
+                r.prediction_trigram,
+            )
+        } else {
+            (r.unigram, r.bigram, r.trigram)
+        };
 
         // Every candidate is held to the unigram order, a word the dictionary does not
         // know (a possessive from the context tables, say) with a frequency of zero, so
         // that the renormalization below is the same for all candidates in this context
         if self.unigram_total > 0 {
             let frequency = self.frequency_of(word).unwrap_or(0);
-            weighted += self.ranking.unigram * (frequency as f64 / self.unigram_total as f64);
-            weight += self.ranking.unigram;
+            weighted += unigram_weight * (frequency as f64 / self.unigram_total as f64);
+            weight += unigram_weight;
         }
 
         if let Some(prev) = &ctx.prev {
             if let Some(&total) = self.bigram_totals.get(prev)
                 && total > 0
             {
-                weighted += self.ranking.bigram * (ev.bigram as f64 / total as f64);
-                weight += self.ranking.bigram;
+                weighted += bigram_weight * (ev.bigram as f64 / total as f64);
+                weight += bigram_weight;
             }
             if let Some(prev_prev) = &ctx.prev_prev
                 && let Some(&total) = self.trigram_totals.get(&(prev_prev.clone(), prev.clone()))
                 && total > 0
             {
-                weighted += self.ranking.trigram * (ev.trigram as f64 / total as f64);
-                weight += self.ranking.trigram;
+                weighted += trigram_weight * (ev.trigram as f64 / total as f64);
+                weight += trigram_weight;
             }
         }
 
@@ -1397,6 +1429,54 @@ mod tests {
         assert_eq!(dict.suggest("m", &after_in, 3)[0], "must");
         // With it, the triple decides
         assert_eq!(dict.suggest("m", &after_of_in, 3)[0], "morning");
+    }
+
+    #[test]
+    fn test_next_word_is_predicted_from_the_context_alone() {
+        let mut dict = trigram_dict();
+        let after_in = Context::new(Some("in".to_string()), None);
+        let after_of_in = Context::new(Some("in".to_string()), Some("of".to_string()));
+
+        assert_eq!(dict.predict_next(&after_in, 3), vec!["must", "morning"]);
+        assert_eq!(dict.predict_next(&after_of_in, 1), vec!["morning"]);
+        // A learned phrase comes first, as it does with a prefix
+        dict.record_user_bigram("in", "much");
+        assert_eq!(dict.predict_next(&after_in, 1), vec!["much"]);
+
+        // Nothing to go on: no word before the caret, or one no table knows. The most
+        // frequent words of English are not offered as a guess.
+        assert!(dict.predict_next(&Context::default(), 3).is_empty());
+        let unknown = Context::new(Some("much".to_string()), None);
+        assert!(dict.predict_next(&unknown, 3).is_empty());
+    }
+
+    #[test]
+    fn test_predictions_have_weights_of_their_own() {
+        let mut dict = trigram_dict();
+        let after_of_in = Context::new(Some("in".to_string()), Some("of".to_string()));
+        // Without the trigram in the prediction weights the pairs decide; the weights for
+        // a typed prefix are left alone either way
+        dict.set_ranking(Ranking {
+            prediction_trigram: 0.0,
+            ..Ranking::default()
+        });
+        assert_eq!(dict.predict_next(&after_of_in, 1), vec!["must"]);
+        assert_eq!(dict.suggest("m", &after_of_in, 1), vec!["morning"]);
+
+        dict.set_ranking(Ranking::default());
+        assert_eq!(dict.predict_next(&after_of_in, 1), vec!["morning"]);
+    }
+
+    #[test]
+    fn test_predictions_keep_names_and_hide_offensive_words() {
+        let mut dict = Dictionary::from_frequency_text("in 500\nlondon 100\ndamn 90\ni 800");
+        dict.load_bigrams_tsv("in\tlondon\t50\nin\tdamn\t40\nand\ti\t30");
+        dict.load_proper_nouns("London");
+        dict.load_blocked_words("damn");
+        let after_in = Context::new(Some("in".to_string()), None);
+        assert_eq!(dict.predict_next(&after_in, 3), vec!["London"]);
+        let after_and = Context::new(Some("and".to_string()), None);
+        assert_eq!(dict.predict_next(&after_and, 3), vec!["I"]);
     }
 
     #[test]

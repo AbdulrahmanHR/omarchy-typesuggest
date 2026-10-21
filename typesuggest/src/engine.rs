@@ -673,7 +673,13 @@ impl Engine {
     /// Type a chosen suggestion over the word at the caret, as the state machine's
     /// `KeyAction::CommitCandidate` describes, then learn the phrase. Accept keys and clicks on
     /// the bar both end here; `time` stamps the Backspace and Delete keys sent to terminals.
-    fn commit_candidate(&mut self, commit: KeyAction, time: u32, conn: &Connection) {
+    fn commit_candidate(
+        &mut self,
+        commit: KeyAction,
+        time: u32,
+        conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
         let KeyAction::CommitCandidate {
             deleted_before,
             deleted_after,
@@ -748,6 +754,15 @@ impl Engine {
             self.dict.record_user_bigram(pw, &chosen_word);
             self.state_machine.invalidate_suggestions();
             self.save_learned_phrases();
+        }
+
+        // 4. With predict_next_word, offer the word that likely follows the committed one
+        if let Some(candidates) = self.state_machine.predict_after_commit(&self.dict) {
+            // The commit is an edit like a key, even from a click long after the last one: the
+            // app's report of it must not count as a change made elsewhere and close the bar
+            self.last_key_at = Some(std::time::Instant::now());
+            self.hover_index = None;
+            self.render_and_show(qh, &candidates, None);
         }
     }
 
@@ -844,10 +859,10 @@ impl Engine {
 
     /// A button press on the popup: a left click on a suggestion takes that word, other
     /// buttons and the bar's padding do nothing, and the transparent part above the bar hides it
-    fn press_popup(&mut self, button: u32, time: u32, conn: &Connection) {
+    fn press_popup(&mut self, button: u32, time: u32, conn: &Connection, qh: &QueueHandle<Self>) {
         if self.pointer_on_bar() {
             if button == BTN_LEFT {
-                self.click_bar(time, conn);
+                self.click_bar(time, conn, qh);
             }
         } else {
             self.input_off_bar();
@@ -878,7 +893,7 @@ impl Engine {
     /// A left click on the popup commits the suggestion under the pointer, exactly as an accept
     /// key commits the highlighted one. Clicks beside the pills do nothing. `time` is the
     /// button event's timestamp.
-    fn click_bar(&mut self, time: u32, conn: &Connection) {
+    fn click_bar(&mut self, time: u32, conn: &Connection, qh: &QueueHandle<Self>) {
         let Some((x, y)) = self.pointer_pos else {
             return;
         };
@@ -916,7 +931,7 @@ impl Engine {
             return;
         }
         if let Some(commit) = self.state_machine.commit_candidate(index) {
-            self.commit_candidate(commit, time, conn);
+            self.commit_candidate(commit, time, conn, qh);
         }
     }
 
@@ -1102,7 +1117,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Engine {
                 state: WEnum::Value(wl_pointer::ButtonState::Pressed),
                 ..
             } => {
-                state.press_popup(button, time, conn);
+                state.press_popup(button, time, conn, qh);
             }
             // A scroll over the transparent part above the bar was meant for the text there
             wl_pointer::Event::Axis { .. } => {
@@ -1531,14 +1546,19 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                     // Keys that cannot be swallowed go to the app before any slower work (window
                     // and process checks, dictionary lookups, drawing), so typing never waits on it
                     // number_select: the modifier with 1 to 5 takes the suggestion with that number
-                    // on the bar
+                    // on the bar. A digit alone after a space starts a number, so with "plain" it
+                    // never takes a prediction of the next word.
+                    let plain_over_prediction = state.config.number_select == NumberSelect::Plain
+                        && state.state_machine.showing_predictions();
                     let number_pick = number_key_index(key).filter(|&index| {
-                        state.config.number_select.is_held(
-                            ctrl_active,
-                            alt_active,
-                            shift_active,
-                            super_active,
-                        ) && state.is_popup_visible
+                        !plain_over_prediction
+                            && state.config.number_select.is_held(
+                                ctrl_active,
+                                alt_active,
+                                shift_active,
+                                super_active,
+                            )
+                            && state.is_popup_visible
                             && state
                                 .state_machine
                                 .shown_candidates()
@@ -1599,7 +1619,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         && let Some(commit) = state.state_machine.commit_candidate(index)
                     {
                         state.swallowed_keys.insert(key);
-                        state.commit_candidate(commit, time, conn);
+                        state.commit_candidate(commit, time, conn, qh);
                         return;
                     }
 
@@ -1676,7 +1696,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         commit @ KeyAction::CommitCandidate { .. } => {
                             // SWALLOW Enter / Space / Tab key (zero accidental chat sends or extra spaces!)
                             state.swallowed_keys.insert(key);
-                            state.commit_candidate(commit, time, conn);
+                            state.commit_candidate(commit, time, conn, qh);
                         }
 
                         KeyAction::Consume => {

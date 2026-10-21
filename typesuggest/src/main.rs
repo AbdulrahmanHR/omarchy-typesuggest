@@ -256,6 +256,8 @@ fn print_help() {
     println!("    number_select = off | alt | ctrl Modifier + 1 to 5 takes that suggestion (off)");
     println!("                    | plain          ...or the number key alone");
     println!("    trailing_space = true | false    Add a space after the committed word (true)");
+    println!("    predict_next_word = true | false Suggest the next word after a space, before");
+    println!("                                     typing any of it (false)");
     println!(
         "    hover_highlight = true | false   Highlight the suggestion under the mouse (true)"
     );
@@ -276,6 +278,7 @@ fn print_help() {
     );
     println!("    - Press Up arrow (or Down, with select_key = down) to navigate into suggestions");
     println!("    - Press Left / Right arrow to cycle between suggestions");
+    println!("    - Press the select arrow again to close the bar and pass the key to the app");
     println!(
         "    - Press the other arrow (Down, or Up with select_key = down) or Escape to cancel"
     );
@@ -574,6 +577,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  - Trailing space: {}",
         if config.trailing_space { "on" } else { "off" }
+    );
+    println!(
+        "  - Predict next word: {}",
+        if config.predict_next_word {
+            "on"
+        } else {
+            "off"
+        }
     );
     println!(
         "  - Hover highlight: {}",

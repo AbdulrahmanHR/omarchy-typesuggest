@@ -515,6 +515,28 @@ impl InputBuffer {
         (prefix, context)
     }
 
+    /// The words before the caret when it sits where the next word starts: right after the
+    /// one space that follows a whole word, with no word after the caret. None anywhere else,
+    /// including after a full stop, where the word before says nothing about the next one.
+    pub fn next_word_context(&self) -> Option<Context> {
+        let cur = self.cursor.min(self.chars.len());
+        let before = &self.chars[..cur];
+        let one_space = cur >= 2
+            && before[cur - 1].is_whitespace()
+            && before[cur - 1] != '\n'
+            && !before[cur - 2].is_whitespace();
+        if !one_space || self.chars.get(cur).is_some_and(|&c| is_word_char(c)) {
+            return None;
+        }
+        // The word before may have begun out of sight (pasted, recalled)
+        let (word_start, _) = prev_word_span(before, cur)?;
+        if word_start == 0 && self.unknown_start {
+            return None;
+        }
+        let context = context_before(before, cur);
+        context.prev.is_some().then_some(context)
+    }
+
     /// The prefix, and only the word right before it
     pub fn current_word_prefix_and_prev(&self) -> (String, Option<String>) {
         let (prefix, ctx) = self.current_word_context();
@@ -593,6 +615,8 @@ pub struct StateMachine {
     pub tab_accepts_first: bool,
     /// Append a space after the committed word
     pub trailing_space: bool,
+    /// Offer the likely next word after a space, before any letter of it is typed
+    pub predict_next_word: bool,
     /// Last (prefix, context, typo fallback) lookup and its result. GUI apps echo each
     /// keystroke back as surrounding text, which would otherwise repeat the same lookup
     /// two or three times.
@@ -620,6 +644,7 @@ impl StateMachine {
             accept_keys: AcceptKeys::default(),
             tab_accepts_first: false,
             trailing_space: true,
+            predict_next_word: false,
             last_suggestion: None,
             editing: Editing::No,
             reported: None,
@@ -634,6 +659,7 @@ impl StateMachine {
         self.accept_keys = config.accept_keys;
         self.tab_accepts_first = config.tab_accepts_first;
         self.trailing_space = config.trailing_space;
+        self.predict_next_word = config.predict_next_word;
         self.invalidate_suggestions();
         // The next report is looked up again with the new settings, even if the text is the same
         self.reported = None;
@@ -666,10 +692,62 @@ impl StateMachine {
         candidates
     }
 
+    /// With `predict_next_word`, the likely next words when the caret sits where one starts
+    /// (see [`InputBuffer::next_word_context`]); empty otherwise
+    fn predictions(&mut self, dict: &Dictionary) -> Vec<String> {
+        if !self.predict_next_word {
+            return Vec::new();
+        }
+        match self.buffer.next_word_context() {
+            Some(context) => self.suggest(dict, "", &context),
+            None => Vec::new(),
+        }
+    }
+
+    /// Show the next-word predictions for the caret, if there are any
+    fn show_predictions(&mut self, dict: &Dictionary) -> Option<KeyAction> {
+        let candidates = self.predictions(dict);
+        if candidates.is_empty() {
+            return None;
+        }
+        self.mode = InputMode::Suggesting {
+            prefix: String::new(),
+            suffix: String::new(),
+            candidates: candidates.clone(),
+        };
+        Some(KeyAction::ShowSuggestions {
+            prefix: String::new(),
+            candidates,
+        })
+    }
+
+    /// Whether the bar shows predictions of the next word rather than completions of one
+    pub fn showing_predictions(&self) -> bool {
+        match &self.mode {
+            InputMode::Suggesting { prefix, .. } | InputMode::Navigating { prefix, .. } => {
+                prefix.is_empty()
+            }
+            InputMode::Idle => false,
+        }
+    }
+
+    /// After a committed word and its space, offer the word that likely follows it. Returns the
+    /// predictions now on the bar, or None (and the bar stays closed) when there are none.
+    pub fn predict_after_commit(&mut self, dict: &Dictionary) -> Option<Vec<String>> {
+        let Some(KeyAction::ShowSuggestions { candidates, .. }) = self.show_predictions(dict)
+        else {
+            return None;
+        };
+        // The app's report of the committed word may keep these up, as it would for a key
+        self.editing = Editing::BeforeCaret;
+        Some(candidates)
+    }
+
     /// Whether `handle_key_press` might swallow this key instead of letting it reach the app.
     /// Only keys pressed while navigating, and the select key while suggestions are shown (it
     /// starts navigating) or Tab with `tab_accepts_first`, can be swallowed; every other key
-    /// is forwarded whatever it does here.
+    /// is forwarded whatever it does here. Tab never takes a prediction: after a space it is
+    /// the shell's completion, or an indent.
     pub fn may_swallow(&self, keysym: u32, ctrl_active: bool) -> bool {
         let keysym = main_block_keysym(keysym);
         match self.mode {
@@ -677,7 +755,9 @@ impl StateMachine {
             InputMode::Suggesting { .. } => {
                 !ctrl_active
                     && (keysym == self.select_keysym()
-                        || (keysym == KEY_TAB && self.tab_accepts_first))
+                        || (keysym == KEY_TAB
+                            && self.tab_accepts_first
+                            && !self.showing_predictions()))
             }
             InputMode::Idle => false,
         }
@@ -816,10 +896,17 @@ impl StateMachine {
         let word_suffix = self.buffer.current_word_suffix();
 
         if self.editing != Editing::No
-            && word_prefix.chars().count() >= self.min_prefix_length
-            && word_prefix.chars().any(|c| c.is_alphabetic())
+            && ((word_prefix.chars().count() >= self.min_prefix_length
+                && word_prefix.chars().any(|c| c.is_alphabetic()))
+                || (word_prefix.is_empty() && self.editing == Editing::BeforeCaret))
         {
-            let candidates = self.suggest(dict, &word_prefix, &context);
+            // No letter of the word yet: the predictions of the next one, if any. As with
+            // the keys, only typing and Backspace bring them up, never Delete
+            let candidates = if word_prefix.is_empty() {
+                self.predictions(dict)
+            } else {
+                self.suggest(dict, &word_prefix, &context)
+            };
             if !candidates.is_empty() {
                 match &self.mode {
                     InputMode::Navigating { selected_index, .. } => {
@@ -935,10 +1022,11 @@ impl StateMachine {
         }
 
         // 2. With tab_accepts_first, Tab takes the first suggestion without the select key
-        // and is swallowed, as an accept key is
+        // and is swallowed, as an accept key is (a completion only, see `may_swallow`)
         if keysym == KEY_TAB
             && self.tab_accepts_first
             && matches!(self.mode, InputMode::Suggesting { .. })
+            && !self.showing_predictions()
             && let Some(commit) = self.commit_candidate(0)
         {
             return commit;
@@ -996,10 +1084,11 @@ impl StateMachine {
                     return KeyAction::UpdateSelection { index: prev_idx };
                 }
 
-                // The select key already brought the caret into the bar, so pressing it again
-                // (or holding it) stays there; the opposite arrow points back at the text
+                // The select key already brought the caret into the bar, so pressing it a
+                // second time means the caret was meant to move after all (a terminal's
+                // history, the line above): the bar closes and the key reaches the app
                 _ if keysym == self.select_keysym() => {
-                    return KeyAction::Consume;
+                    return self.handle_typing_key(keysym, ch, dict);
                 }
 
                 KEY_UP | KEY_DOWN | KEY_ESCAPE => {
@@ -1190,7 +1279,8 @@ impl StateMachine {
                 self.buffer.insert_char(' ');
                 self.editing = Editing::BeforeCaret;
                 self.mode = InputMode::Idle;
-                KeyAction::HideSuggestions
+                self.show_predictions(dict)
+                    .unwrap_or(KeyAction::HideSuggestions)
             }
 
             KEY_RETURN | KEY_KP_ENTER => {
@@ -1228,6 +1318,12 @@ impl StateMachine {
                             };
                             return KeyAction::ShowSuggestions { prefix, candidates };
                         }
+                    }
+                    // Backspace over the whole word back to the space before it
+                    if prefix.is_empty()
+                        && let Some(action) = self.show_predictions(dict)
+                    {
+                        return action;
                     }
                 }
                 self.mode = InputMode::Idle;
@@ -1325,6 +1421,166 @@ mod tests {
         } else {
             panic!("Expected ShowSuggestions");
         }
+    }
+
+    fn predicting() -> StateMachine {
+        let mut sm = StateMachine::new(3);
+        sm.predict_next_word = true;
+        sm
+    }
+
+    fn type_keys(sm: &mut StateMachine, dict: &Dictionary, text: &str) -> KeyAction {
+        let mut act = KeyAction::PassThrough;
+        for c in text.chars() {
+            act = sm.handle_key_press(c as u32, Some(c), false, dict);
+        }
+        act
+    }
+
+    fn shown_words(act: &KeyAction) -> Option<Vec<String>> {
+        match act {
+            KeyAction::ShowSuggestions { candidates, .. } => Some(candidates.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_next_word_after_a_space_only_when_turned_on() {
+        let dict = setup_dict();
+        let mut sm = StateMachine::new(3);
+        assert_eq!(
+            type_keys(&mut sm, &dict, "good "),
+            KeyAction::HideSuggestions
+        );
+
+        let mut sm = predicting();
+        let act = type_keys(&mut sm, &dict, "good ");
+        assert_eq!(shown_words(&act), Some(vec!["morning".to_string()]));
+        assert!(sm.showing_predictions());
+
+        // A letter turns the predictions into completions of that word
+        let act = type_keys(&mut sm, &dict, "m");
+        assert_eq!(shown_words(&act).unwrap()[0], "morning");
+        assert!(!sm.showing_predictions());
+    }
+
+    #[test]
+    fn test_taking_a_prediction_types_the_word_after_the_space() {
+        let dict = setup_dict();
+        let mut sm = predicting();
+        type_keys(&mut sm, &dict, "good ");
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        let act = sm.handle_key_press(KEY_RETURN, None, false, &dict);
+        assert_eq!(
+            act,
+            KeyAction::CommitCandidate {
+                deleted_before: String::new(),
+                deleted_after: String::new(),
+                replacement: "morning ".to_string(),
+                prev_word: Some("good".to_string()),
+                chosen_word: "morning".to_string(),
+            }
+        );
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "good morning ");
+    }
+
+    #[test]
+    fn test_no_prediction_where_no_new_word_starts() {
+        let dict = setup_dict();
+        let mut sm = predicting();
+        // After a full stop, after a second space, and with nothing known about the word
+        assert_eq!(
+            type_keys(&mut sm, &dict, "good. "),
+            KeyAction::HideSuggestions
+        );
+        sm.reset();
+        type_keys(&mut sm, &dict, "good ");
+        assert_eq!(type_keys(&mut sm, &dict, " "), KeyAction::HideSuggestions);
+        sm.reset();
+        assert_eq!(
+            type_keys(&mut sm, &dict, "hello "),
+            KeyAction::HideSuggestions
+        );
+
+        // A word right after the caret ("good |day")
+        sm.reset();
+        sm.buffer.sync_from_surrounding("good ", "day");
+        assert_eq!(sm.buffer.next_word_context(), None);
+
+        // The word before may be the end of a longer one that was pasted ("...good")
+        sm.reset();
+        sm.forget_word();
+        assert_eq!(
+            type_keys(&mut sm, &dict, "good "),
+            KeyAction::HideSuggestions
+        );
+    }
+
+    #[test]
+    fn test_tab_never_takes_a_prediction() {
+        let dict = setup_dict();
+        let mut sm = predicting();
+        sm.tab_accepts_first = true;
+        type_keys(&mut sm, &dict, "good ");
+        assert!(!sm.may_swallow(KEY_TAB, false));
+        let act = sm.handle_key_press(KEY_TAB, Some('\t'), false, &dict);
+        assert!(!matches!(act, KeyAction::CommitCandidate { .. }));
+    }
+
+    #[test]
+    fn test_backspace_back_to_the_space_predicts_again() {
+        let dict = setup_dict();
+        let mut sm = predicting();
+        type_keys(&mut sm, &dict, "good m");
+        let act = sm.handle_key_press(KEY_BACKSPACE, None, false, &dict);
+        assert_eq!(shown_words(&act), Some(vec!["morning".to_string()]));
+    }
+
+    #[test]
+    fn test_reports_keep_the_predictions_up() {
+        let dict = setup_dict();
+        let mut sm = predicting();
+        type_with_reports(&mut sm, &dict, "", "good ");
+        assert!(sm.showing_predictions());
+        // A report that only echoes the space changes nothing
+        let act = report(&mut sm, &dict, "good ", 5);
+        assert_eq!(shown_words(&act), Some(vec!["morning".to_string()]));
+    }
+
+    #[test]
+    fn test_delete_never_brings_up_predictions() {
+        let dict = setup_dict();
+        let mut sm = predicting();
+        // "good |x": Delete takes the x, in the key path and in the app's report alike
+        report(&mut sm, &dict, "good x", 5);
+        assert_eq!(
+            sm.handle_key_press(KEY_DELETE, None, false, &dict),
+            KeyAction::HideSuggestions
+        );
+        report(&mut sm, &dict, "good ", 5);
+        assert!(!sm.showing_predictions());
+    }
+
+    #[test]
+    fn test_prediction_follows_a_committed_word() {
+        let mut dict = setup_dict();
+        dict.insert("good", 950);
+        dict.rebuild_caches();
+        let mut sm = predicting();
+        type_keys(&mut sm, &dict, "goo");
+        assert!(sm.commit_candidate(0).is_some());
+        assert_eq!(
+            sm.predict_after_commit(&dict),
+            Some(vec!["morning".to_string()])
+        );
+        assert!(sm.showing_predictions());
+
+        // Off, the bar stays closed after a commit
+        let mut sm = StateMachine::new(3);
+        type_keys(&mut sm, &dict, "goo");
+        sm.commit_candidate(0);
+        assert_eq!(sm.predict_after_commit(&dict), None);
+        assert_eq!(sm.mode, InputMode::Idle);
     }
 
     #[test]
@@ -2035,7 +2291,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_key_again_stays_in_the_bar() {
+    fn test_select_key_twice_closes_the_bar_and_reaches_the_app() {
         let dict = setup_dict();
         let mut sm = StateMachine::new(3);
 
@@ -2046,16 +2302,20 @@ mod tests {
         sm.handle_key_press(KEY_UP, None, false, &dict);
         sm.handle_key_press(KEY_RIGHT, None, false, &dict);
 
-        // Up again (or held) is swallowed and keeps the highlight where it is
+        // Up again leaves the bar and moves the caret (or recalls a command) in the app,
+        // so the word at the caret is no longer known
         let act = sm.handle_key_press(KEY_UP, None, false, &dict);
-        assert_eq!(act, KeyAction::Consume);
-        assert!(matches!(
-            sm.mode,
-            InputMode::Navigating {
-                selected_index: 1,
-                ..
-            }
-        ));
+        assert_eq!(act, KeyAction::HideSuggestions);
+        assert_eq!(sm.mode, InputMode::Idle);
+        assert!(sm.buffer.unknown_start);
+
+        // The same for a prediction of the next word
+        let mut sm = predicting();
+        type_keys(&mut sm, &setup_dict(), "good ");
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        let act = sm.handle_key_press(KEY_UP, None, false, &dict);
+        assert_eq!(act, KeyAction::HideSuggestions);
+        assert_eq!(sm.mode, InputMode::Idle);
     }
 
     #[test]
@@ -2933,16 +3193,21 @@ mod tests {
         sm.handle_key_press(KEY_TAB, None, false, &dict);
         assert_eq!(sm.buffer.chars.iter().collect::<String>(), " program ");
 
-        // In the bar, Down again stays there, while Up (the way back to the text) and Escape
-        // leave it
+        // In the bar, Down again closes it and reaches the app, while Up (the way back to the
+        // text) and Escape leave it and are swallowed
         for c in " pro".chars() {
             sm.handle_key_press(c as u32, Some(c), false, &dict);
         }
         sm.handle_key_press(KEY_DOWN, None, false, &dict);
         assert_eq!(
             sm.handle_key_press(KEY_DOWN, None, false, &dict),
-            KeyAction::Consume
+            KeyAction::HideSuggestions
         );
+        assert_eq!(sm.mode, InputMode::Idle);
+        for c in " pro".chars() {
+            sm.handle_key_press(c as u32, Some(c), false, &dict);
+        }
+        sm.handle_key_press(KEY_DOWN, None, false, &dict);
         for back in [KEY_UP, KEY_ESCAPE] {
             assert_eq!(
                 sm.handle_key_press(back, None, false, &dict),

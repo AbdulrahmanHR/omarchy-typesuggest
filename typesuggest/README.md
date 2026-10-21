@@ -176,6 +176,8 @@ A click within a moment (0.3 s) of the bar appearing or changing its words is ig
 
 The key that enters navigation (`select_key`, `Up` or `Down`), the keys that commit (`accept_keys`) and the space after the word (`trailing_space`) can be changed in the configuration. A key left out of `accept_keys` ends navigation and reaches the app as usual, so with `accept_keys = space, tab` Enter always sends your message. With `tab_accepts_first = true`, Tab takes the first suggestion straight away, no select key needed. With `number_select = "alt"` (or `"ctrl"`), each suggestion shows a small number, and holding that modifier while pressing the number takes it; with `"plain"` the number key alone does.
 
+With `predict_next_word = true`, the bar also shows right after a space, before any letter of the next word, with the words that usually follow the one you just wrote ("how are " offers "you"), and again after you take a suggestion. Take one with the select key and an accept key, a click, or a modifier with its number. Tab and a number key alone never take a prediction, so shell completion and typing numbers work as usual. Nothing is predicted at the start of a field, after a full stop, or after a word the language model has no phrases for.
+
 ---
 
 ## ⚙️ Configuration
@@ -229,6 +231,9 @@ number_select = "off"
 # Insert a space after the committed word (default: true)
 trailing_space = true
 
+# Suggest the next word after a space, before you type any of it (default: false)
+predict_next_word = false
+
 # Highlight the suggestion under the mouse (default: true)
 hover_highlight = true
 
@@ -258,11 +263,12 @@ font = ""
 | `bar_position` | `"below"` | `"below"` or `"above"` the caret. Near the bottom of the screen the bar always goes above. With `"above"`, Hyprland gives the empty area above the bar to the input method while the bar shows, so a click or scroll there only hides the bar: move the mouse a little, then click the text again. With `mouse_hides_bar = true` the bar hides as soon as the mouse moves over that area instead, so reach the bar from below or from the side. Moving the mouse onto the bar never hides it. |
 | `theme` | `"omarchy"` | `"omarchy"` takes the bar colors from the current Omarchy theme (`$XDG_STATE_HOME/omarchy/current/theme/colors.toml`) and follows theme switches automatically, falling back to the built-in palette when no Omarchy theme is found. `"default"` always uses the built-in dark teal palette. |
 | `color_background`, `color_border`, `color_pill`, `color_pill_border`, `color_text`, `color_accent`, `color_accent_text` | unset | Override single colors (bar background and border, unselected pill background, border and text, selected pill background and text) as `"#rrggbb"` or `"#rrggbbaa"`. Invalid values are ignored. |
-| `select_key` | `"up"` | Arrow key that moves into the suggestions while they show: `"up"` or `"down"`. The other arrow then moves the caret as usual. In navigation, the other arrow or `Escape` goes back to the text, and the select key again stays in the bar. |
+| `select_key` | `"up"` | Arrow key that moves into the suggestions while they show: `"up"` or `"down"`. The other arrow then moves the caret as usual. In navigation, the other arrow or `Escape` goes back to the text, and pressing the select key a second time closes the bar and reaches the app (so Up Up recalls a terminal's history). |
 | `accept_keys` | `enter, space, tab` | Keys that commit the highlighted suggestion. Any of `enter`, `space`, `tab`; also written as `["enter", "tab"]`. Other keys end navigation and reach the app. |
 | `tab_accepts_first` | `false` | Tab commits the first suggestion while the bar shows, without pressing the select key first. Once you are in navigation, Tab takes the highlighted word as usual. Tab reaches the app when no suggestions show. |
 | `number_select` | `"off"` | `"plain"`: press a suggestion's number to take it; while suggestions show, those digits no longer type (so "mp3" needs the bar dismissed first, e.g. with Escape). `"alt"` or `"ctrl"`: hold it and press a suggestion's number (digits row or keypad) to take that suggestion; each suggestion then shows its number. Only that modifier on its own counts, and only while the bar shows, so Ctrl+1 or Alt+1 reaches the app otherwise. With `"alt"`, an app that opens its menu on a lone Alt press (Firefox) may show its menu bar afterwards; `"ctrl"` avoids that. |
 | `trailing_space` | `true` | Add a space after the committed word. The accept key itself is still swallowed. |
+| `predict_next_word` | `false` | Right after a space (and after a taken suggestion), show the words that usually follow the word before, from the bigram and trigram tables and your learned phrases. Tab and a number key alone never take a prediction. |
 | `hover_highlight` | `true` | Highlight the suggestion under the mouse the way the keyboard selection is shown. A click takes the word under the mouse either way. |
 | `mouse_hides_bar` | `false` | Only with `bar_position = "above"`: hide the bar as soon as the mouse moves over the empty area above it, so a click there always reaches the text. Off, the bar stays until that area is clicked. |
 | `disabled_apps` | none | Window classes where TypeSuggest does nothing at all, e.g. `code, org.wezfurlong.wezterm` or `["code", "steam*"]`. Matching is case-insensitive and a trailing `*` matches any suffix. Find a window's class with `hyprctl activewindow`. |
