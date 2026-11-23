@@ -302,18 +302,20 @@ pub fn classify_foreground(comms: &[String]) -> TerminalForeground {
     }
 }
 
-/// Whether a /proc/PID/stat line is of a process that owns its controlling terminal's
-/// foreground: its process group is the terminal's foreground group
+/// Whether a /proc/PID/stat line is of the job in its terminal's foreground: the leader of the
+/// terminal's foreground process group. Only the leader counts, so a helper a program starts
+/// in its own group ("sh -c" for a plugin) does not make it look like a shell.
 fn is_tty_foreground(stat: &str) -> bool {
     // The name in parentheses may hold spaces and parentheses; the fields after the last ")"
     // are state, ppid, pgrp, session, tty_nr, tpgid
+    let pid = stat.split_whitespace().next();
     let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
         return false;
     };
     let fields: Vec<&str> = rest.split_whitespace().collect();
-    match (fields.get(2), fields.get(4), fields.get(5)) {
-        (Some(pgrp), Some(tty), Some(tpgid)) => {
-            *tty != "0" && *tpgid != "-1" && *tpgid != "0" && pgrp == tpgid
+    match (pid, fields.get(2), fields.get(4), fields.get(5)) {
+        (Some(pid), Some(pgrp), Some(tty), Some(tpgid)) => {
+            *tty != "0" && *tpgid != "-1" && *tpgid != "0" && pgrp == tpgid && pid == *pgrp
         }
         _ => false,
     }
@@ -596,7 +598,7 @@ mod foreground_tests {
     fn test_tty_foreground_is_read_from_the_stat_line() {
         // pgrp 500 is the foreground group (tpgid 500) of terminal 34816
         assert!(is_tty_foreground(
-            "501 (bash) S 400 500 500 34816 500 4194304 1"
+            "500 (bash) S 400 500 500 34816 500 4194304 1"
         ));
         // A background job: its group is not the foreground one
         assert!(!is_tty_foreground(
@@ -606,6 +608,8 @@ mod foreground_tests {
         assert!(!is_tty_foreground("503 (node) S 1 503 503 0 -1 4194304 1"));
         // A name with spaces and parentheses
         assert!(is_tty_foreground("504 (a) b) S 400 504 504 34816 504 0 1"));
+        // A helper in the foreground job's group, but not its leader
+        assert!(!is_tty_foreground("505 (sh) S 500 500 500 34816 500 0 1"));
         assert!(!is_tty_foreground("garbage"));
     }
 }

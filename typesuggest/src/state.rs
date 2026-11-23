@@ -319,7 +319,7 @@ fn ends_in_abbreviation(before_dot: &[char]) -> bool {
         || token.contains('.')
         || (token.chars().count() == 1 && token.chars().all(char::is_alphabetic))
         || [
-            "mr", "mrs", "ms", "dr", "prof", "vs", "etc", "inc", "jr", "sr", "st", "no",
+            "mr", "mrs", "ms", "dr", "prof", "vs", "etc", "inc", "jr", "sr", "st",
         ]
         .contains(&lower.as_str())
 }
