@@ -11,6 +11,8 @@ const KEY_END: u32 = 0xff57;
 const KEY_RETURN: u32 = 0xff0d;
 const KEY_KP_ENTER: u32 = 0xff8d;
 const KEY_TAB: u32 = 0xff09;
+/// Shift+Tab
+const KEY_ISO_LEFT_TAB: u32 = 0xfe20;
 const KEY_ESCAPE: u32 = 0xff1b;
 const KEY_BACKSPACE: u32 = 0xff08;
 const KEY_DELETE: u32 = 0xffff;
@@ -1274,6 +1276,20 @@ impl StateMachine {
                 KeyAction::HideSuggestions
             }
 
+            // A Tab that reaches the app (one that takes no suggestion) is most often ignored
+            // in a text field, so the word goes on after it: typing more of it, or Backspace,
+            // must see its start, and a commit must replace all of it. An app that does
+            // something with Tab (an indent) reports its text and corrects the buffer.
+            KEY_TAB | KEY_ISO_LEFT_TAB => {
+                let was_suggesting = self.mode != InputMode::Idle;
+                self.dismiss();
+                if was_suggesting {
+                    KeyAction::HideSuggestions
+                } else {
+                    KeyAction::PassThrough
+                }
+            }
+
             KEY_SPACE => {
                 // Normal space typed in document is inserted into buffer so deleting back into previous word works!
                 self.buffer.insert_char(' ');
@@ -1747,6 +1763,66 @@ mod tests {
         assert!(!sm.may_swallow(KEY_TAB, false));
         let act = sm.handle_key_press(KEY_TAB, None, false, &dict);
         assert!(!is_swallowed(&act), "Tab swallowed via {act:?}");
+    }
+
+    #[test]
+    fn test_backspace_after_an_ignored_tab_deletes_the_letter() {
+        // The app ignored Tab, so Backspace deleted the "o" there. Picking a word must then
+        // replace only "pr", not "pro" (which would eat the space before it).
+        let dict = setup_dict();
+        for (tab, tabs) in [(KEY_TAB, 1), (KEY_ISO_LEFT_TAB, 1), (KEY_TAB, 2)] {
+            let mut sm = StateMachine::new(3);
+            type_keys(&mut sm, &dict, "for pro");
+            for _ in 0..tabs {
+                let act = sm.handle_key_press(tab, Some('\t'), false, &dict);
+                assert!(!is_swallowed(&act), "{act:?}");
+            }
+            sm.handle_key_press(KEY_BACKSPACE, None, false, &dict);
+            assert_eq!(sm.buffer.chars.iter().collect::<String>(), "for pr");
+            let Some(KeyAction::CommitCandidate { deleted_before, .. }) = sm.commit_candidate(0)
+            else {
+                panic!("no suggestions for \"pr\" after Backspace: {:?}", sm.mode);
+            };
+            assert_eq!(deleted_before, "pr");
+        }
+    }
+
+    #[test]
+    fn test_typing_on_after_an_ignored_tab_sees_the_whole_word() {
+        // "for exa", a stray Tab the app ignored, then "m": the word is "exam", and picking
+        // a suggestion replaces all of it rather than leaving "exa" in front
+        let dict = setup_dict();
+        for tab in [KEY_TAB, KEY_ISO_LEFT_TAB] {
+            let mut sm = StateMachine::new(3);
+            type_keys(&mut sm, &dict, "for pr");
+            sm.handle_key_press(tab, Some('\t'), false, &dict);
+            let act = sm.handle_key_press('o' as u32, Some('o'), false, &dict);
+            assert!(matches!(act, KeyAction::ShowSuggestions { .. }), "{act:?}");
+            assert_eq!(sm.buffer.current_word_context().0, "pro");
+            let Some(KeyAction::CommitCandidate { deleted_before, .. }) = sm.commit_candidate(0)
+            else {
+                panic!("nothing to commit: {:?}", sm.mode);
+            };
+            assert_eq!(deleted_before, "pro");
+        }
+    }
+
+    #[test]
+    fn test_tab_at_the_start_keeps_suggestions_for_the_first_word() {
+        // Shift+Tab or Tab before typing (a mode switch, an accepted prompt) must not stop
+        // the first word from being suggested
+        let dict = setup_dict();
+        for tab in [KEY_TAB, KEY_ISO_LEFT_TAB] {
+            let mut sm = StateMachine::new(3);
+            sm.handle_key_press(tab, Some('\t'), false, &dict);
+            sm.handle_key_press('p' as u32, Some('p'), false, &dict);
+            sm.handle_key_press('r' as u32, Some('r'), false, &dict);
+            let act = sm.handle_key_press('o' as u32, Some('o'), false, &dict);
+            assert!(
+                matches!(act, KeyAction::ShowSuggestions { .. }),
+                "{tab:#x}: {act:?}"
+            );
+        }
     }
 
     #[test]
