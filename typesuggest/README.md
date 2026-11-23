@@ -249,6 +249,7 @@ disabled_apps =
 
 # Suggest similar words for typos when nothing matches the typed prefix (default: true)
 typo_correction = true
+show_corrections = true
 
 # Never suggest profanity, sexual slang or slurs (default: true)
 filter_offensive = true
@@ -276,7 +277,8 @@ font = ""
 | `hover_highlight` | `true` | Highlight the suggestion under the mouse the way the keyboard selection is shown. A click takes the word under the mouse either way. |
 | `mouse_hides_bar` | `false` | Only with `bar_position = "above"`: hide the bar as soon as the mouse moves over the empty area above it, so a click there always reaches the text. Off, the bar stays until that area is clicked. |
 | `disabled_apps` | none | Window classes where TypeSuggest does nothing at all, e.g. `code, org.wezfurlong.wezterm` or `["code", "steam*"]`. Matching is case-insensitive and a trailing `*` matches any suffix. Find a window's class with `hyprctl activewindow`. |
-| `typo_correction` | `true` | When nothing starts with the typed letters, suggest similar words (`teh` -> `the`). |
+| `typo_correction` | `true` | Corrects misspellings: a clearly misspelled word is replaced by the likely one (`teh` -> `the`), and when nothing starts with the typed letters, similar words are suggested. Close slips (a neighbouring key, swapped or doubled letters) count as small mistakes. |
+| `show_corrections` | `true` | With `typo_correction`, also show a likely correction after the first suggestion even when other words match (`wich` -> `Wichita`, `with`). Turn it off to see corrections only when they clearly beat what you typed or nothing else matches. Also the "Show likely corrections" switch in the bar panel. |
 | `filter_offensive` | `true` | Never suggest the profanity, sexual slang and slurs in [`data/blocked_words.txt`](data/blocked_words.txt) (whole words and their possessives). A word you list in `words.txt` is suggested anyway. |
 | `font` | `""` | Empty uses Segoe UI (if installed under `~/.local/share/fonts/windows`), then Liberation Sans, then DejaVu Sans. A family name (e.g. `"Inter"`, or a fontconfig pattern like `"Inter:bold"`) is looked up with `fc-match`; a value containing `/` is a font file path (`~/` allowed). Fonts that cannot be loaded fall back to the default with a warning in the log. |
 

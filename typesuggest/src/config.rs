@@ -42,8 +42,11 @@ pub struct Config {
     /// Lowercase Hyprland window classes (a trailing `*` matches any suffix) where typesuggest
     /// stays out of the way
     pub disabled_apps: Vec<String>,
-    /// Fall back to similar words when nothing starts with the typed prefix
+    /// Correct typos: a much likelier word replaces the literal reading, and when nothing
+    /// starts with the typed prefix similar words are offered
     pub typo_correction: bool,
+    /// With typo_correction: also show a likely correction beside the literal completions
+    pub show_corrections: bool,
     /// Never suggest profanity, sexual slang or slurs
     pub filter_offensive: bool,
     /// Font file path or fontconfig family; empty for the built-in font chain
@@ -232,6 +235,7 @@ const SETTABLE_KEYS: &[(&str, &[&str])] = &[
     ("hover_highlight", &[]),
     ("mouse_hides_bar", &[]),
     ("typo_correction", &[]),
+    ("show_corrections", &["corrections"]),
     ("filter_offensive", &[]),
     ("disabled_apps", &[]),
     ("font", &[]),
@@ -265,6 +269,7 @@ pub fn config_line(key: &str, value: &str) -> Result<String, String> {
         | "predict_next_word"
         | "capitalize_sentences"
         | "typo_correction"
+        | "show_corrections"
         | "filter_offensive"
         | "hover_highlight"
         | "mouse_hides_bar" => parse_bool()?.to_string(),
@@ -420,6 +425,7 @@ impl Default for Config {
             mouse_hides_bar: false,
             disabled_apps: Vec::new(),
             typo_correction: true,
+            show_corrections: true,
             filter_offensive: true,
             font: String::new(),
         }
@@ -568,6 +574,11 @@ impl Config {
                             self.typo_correction = b;
                         }
                     }
+                    "show_corrections" => {
+                        if let Ok(b) = val.parse::<bool>() {
+                            self.show_corrections = b;
+                        }
+                    }
                     "filter_offensive" => {
                         if let Ok(b) = val.parse::<bool>() {
                             self.filter_offensive = b;
@@ -597,7 +608,7 @@ impl Config {
         };
         let apps: Vec<&str> = self.disabled_apps.iter().map(String::as_str).collect();
         format!(
-            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"tab_accepts_first\":{},\"number_select\":{},\"trailing_space\":{},\"predict_next_word\":{},\"capitalize_sentences\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"filter_offensive\":{},\"disabled_apps\":{},\"font\":{}}}",
+            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"tab_accepts_first\":{},\"number_select\":{},\"trailing_space\":{},\"predict_next_word\":{},\"capitalize_sentences\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"show_corrections\":{},\"filter_offensive\":{},\"disabled_apps\":{},\"font\":{}}}",
             self.learn,
             self.min_prefix_length,
             self.max_candidates,
@@ -614,6 +625,7 @@ impl Config {
             self.hover_highlight,
             self.mouse_hides_bar,
             self.typo_correction,
+            self.show_corrections,
             self.filter_offensive,
             list(&apps),
             json_string(&self.font),
@@ -707,8 +719,13 @@ mouse_hides_bar = false
 # Find a window's class with: hyprctl activewindow
 disabled_apps =
 
-# Suggest similar words for typos when nothing matches the typed prefix (default: true)
+# Correct typos (default: true): a word you clearly misspelled ("teh") is replaced by the
+# likely one, and when nothing starts with what you typed, similar words are offered
 typo_correction = true
+
+# With typo_correction: also show a likely correction beside the normal suggestions, after
+# the first one, before nothing else matches (default: true)
+show_corrections = true
 
 # Never suggest profanity, sexual slang or slurs (default: true). A word you list in words.txt
 # is suggested anyway.
@@ -1017,7 +1034,9 @@ mod tests {
             json.contains("\"select_key\":\"up\",\"accept_keys\":[\"enter\",\"space\",\"tab\"]")
         );
         assert!(json.contains("\"tab_accepts_first\":false,\"number_select\":\"off\""));
-        assert!(json.contains("\"typo_correction\":true,\"filter_offensive\":true"));
+        assert!(json.contains(
+            "\"typo_correction\":true,\"show_corrections\":true,\"filter_offensive\":true"
+        ));
         assert!(json.contains("\"trailing_space\":true,\"predict_next_word\":false"));
         assert!(json.contains("\"disabled_apps\":[\"code\"]"));
         assert!(json.contains("\"hover_highlight\":true,\"mouse_hides_bar\":false"));
@@ -1237,6 +1256,19 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+    #[test]
+    fn test_show_corrections_option() {
+        assert!(Config::default().show_corrections);
+        assert_eq!(
+            config_line("show_corrections", "off").unwrap(),
+            "show_corrections = false"
+        );
+        assert!(config_line("show_corrections", "maybe").is_err());
+        let mut cfg = Config::default();
+        cfg.parse_str("show_corrections = false\n");
+        assert!(!cfg.show_corrections);
+    }
+
     #[test]
     fn test_capitalize_sentences_option() {
         assert!(Config::default().capitalize_sentences);

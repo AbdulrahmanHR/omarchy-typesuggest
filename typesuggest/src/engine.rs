@@ -353,6 +353,7 @@ impl Engine {
         self.renderer.bar_scale = config.bar_scale;
         self.renderer.show_numbers = config.number_select != NumberSelect::Off;
         self.dict.set_typo_correction(config.typo_correction);
+        self.dict.set_show_corrections(config.show_corrections);
         self.dict.set_filter_offensive(config.filter_offensive);
 
         // Read the learned phrases before learning starts, or the next save would overwrite

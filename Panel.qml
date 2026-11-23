@@ -31,6 +31,7 @@ Panel {
   //   predict        switch row (when typesuggest reports predict_next_word)
   //   capitalize     switch row (when typesuggest reports capitalize_sentences)
   //   learn, typo    switch rows
+  //   corrections    switch row (when typesuggest reports show_corrections, typo correction on)
   //   offensive      switch row (when typesuggest reports filter_offensive)
   //   hover          switch row (when typesuggest reports hover_highlight)
   //   mousehide      switch row (likewise, and only with the bar above the caret)
@@ -109,6 +110,9 @@ Panel {
   readonly property bool predictSupported: typeof root.config.predict_next_word === "boolean"
   // Likewise for capitalize_sentences
   readonly property bool capitalizeSupported: typeof root.config.capitalize_sentences === "boolean"
+  // Likewise for show_corrections; only meaningful while typo correction is on
+  readonly property bool showCorrectionsRow: typeof root.config.show_corrections === "boolean"
+    && root.config.typo_correction === true
   // Likewise for number_select
   readonly property bool numberSelectSupported: typeof root.config.number_select === "string"
   // Likewise for filter_offensive
@@ -128,6 +132,7 @@ Panel {
       if (predictSupported) list.push("predict")
       if (capitalizeSupported) list.push("capitalize")
       list = list.concat(["learn", "typo"])
+      if (showCorrectionsRow) list.push("corrections")
       if (offensiveFilterSupported) list.push("offensive")
       if (mouseSettingsSupported) list.push("hover")
       if (showMouseHidesBar) list.push("mousehide")
@@ -212,6 +217,7 @@ Panel {
     else if (focusSection === "capitalize") typesuggest.setOption("capitalize_sentences", !root.config.capitalize_sentences)
     else if (focusSection === "learn") typesuggest.setOption("learn", !root.config.learn)
     else if (focusSection === "typo") typesuggest.setOption("typo_correction", !root.config.typo_correction)
+    else if (focusSection === "corrections") typesuggest.setOption("show_corrections", !root.config.show_corrections)
     else if (focusSection === "offensive") typesuggest.setOption("filter_offensive", !root.config.filter_offensive)
     else if (focusSection === "hover") typesuggest.setOption("hover_highlight", !root.config.hover_highlight)
     else if (focusSection === "mousehide") typesuggest.setOption("mouse_hides_bar", !root.config.mouse_hides_bar)
@@ -706,9 +712,19 @@ Panel {
               width: parent.width
               section: "typo"
               title: "Typo correction"
-              caption: "Suggest close words when nothing matches"
+              caption: "Fix misspelled words"
               checked: root.config.typo_correction
               onToggled: typesuggest.setOption("typo_correction", !root.config.typo_correction)
+            }
+
+            SwitchRow {
+              visible: root.showCorrectionsRow
+              width: parent.width
+              section: "corrections"
+              title: "Show likely corrections"
+              caption: "Offer a correction beside the other suggestions"
+              checked: root.config.show_corrections === true
+              onToggled: typesuggest.setOption("show_corrections", !root.config.show_corrections)
             }
 
             SwitchRow {

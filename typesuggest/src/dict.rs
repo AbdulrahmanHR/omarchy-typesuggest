@@ -253,6 +253,12 @@ impl Dictionary {
         self.typo_correction = enabled;
     }
 
+    /// Show a likely correction beside the literal completions (true), or only corrections
+    /// that clearly beat them (false)
+    pub fn set_show_corrections(&mut self, enabled: bool) {
+        self.typo_show_margin = if enabled { TYPO_SHOW_MARGIN } else { 0.0 };
+    }
+
     /// Leave the words in the blocked list out of suggestions (true) or offer them (false)
     pub fn set_filter_offensive(&mut self, enabled: bool) {
         self.filter_offensive = enabled;
@@ -2202,6 +2208,17 @@ mod typo_tests {
         let got = dict.suggest("wich", &Context::default(), 3);
         assert_eq!(got[0], "Wichita", "{got:?}");
         assert!(got[1..].contains(&"with".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn show_corrections_off_keeps_only_corrections_that_win() {
+        let mut dict = Dictionary::embedded();
+        dict.set_show_corrections(false);
+        let got = dict.suggest("wich", &Context::default(), 3);
+        assert_eq!(got[0], "Wichita", "{got:?}");
+        assert!(!got.contains(&"with".to_string()), "{got:?}");
+        // A correction that clearly beats the literal reading still goes first
+        assert_eq!(dict.suggest("teh", &Context::default(), 3)[0], "the");
     }
 
     #[test]

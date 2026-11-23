@@ -46,6 +46,7 @@ function defaultConfig() {
     hover_highlight: true,
     mouse_hides_bar: false,
     typo_correction: true,
+    show_corrections: true,
     filter_offensive: true
   }
 }
@@ -102,6 +103,8 @@ function normalizeConfig(data) {
     hover_highlight: typeof data.hover_highlight === "boolean" ? data.hover_highlight : null,
     mouse_hides_bar: typeof data.mouse_hides_bar === "boolean" ? data.mouse_hides_bar : null,
     typo_correction: typeof data.typo_correction === "boolean" ? data.typo_correction : base.typo_correction,
+    // null when the installed typesuggest predates show_corrections
+    show_corrections: typeof data.show_corrections === "boolean" ? data.show_corrections : null,
     // null when the installed typesuggest predates filter_offensive
     filter_offensive: typeof data.filter_offensive === "boolean" ? data.filter_offensive : null
   }

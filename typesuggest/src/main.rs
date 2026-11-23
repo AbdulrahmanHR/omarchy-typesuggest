@@ -270,6 +270,8 @@ fn print_help() {
         "    disabled_apps = code, steam*     Window classes where typesuggest stays off (none)"
     );
     println!("    typo_correction = true | false   Suggest similar words for typos (true)");
+    println!("    show_corrections = true | false  Show a likely correction beside the others");
+    println!("                                     (true)");
     println!("    filter_offensive = true | false  Never suggest profanity or slurs (true)");
     println!(
         "    font = \"Inter\"                   Font family or .ttf/.otf path (\"\": built-in)"
@@ -612,6 +614,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             "disabled"
         }
+    );
+    println!(
+        "  - Show likely corrections: {}",
+        if config.show_corrections { "on" } else { "off" }
     );
     println!(
         "  - Offensive word filter: {}",
