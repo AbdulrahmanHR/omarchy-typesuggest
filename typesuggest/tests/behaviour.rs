@@ -266,10 +266,11 @@ fn a_commit_keeps_an_opening_quote() {
 #[test]
 fn no_double_space_before_existing_text() {
     for (after, starts) in [(" world", "program world"), (".", "program.")] {
-        let mut field = GuiField::new("", after);
+        // Mid-sentence, so the word keeps its lower case
+        let mut field = GuiField::new("so ", after);
         field.type_text("progr");
         field.commit_first();
-        assert_eq!(field.text(), starts);
+        assert_eq!(field.text(), format!("so {starts}"));
     }
 }
 
@@ -308,7 +309,7 @@ fn editing_a_word_in_the_middle_replaces_all_of_it() {
 
 #[test]
 fn a_pasted_part_of_a_word_completes_in_apps_that_report_text() {
-    let mut field = GuiField::new("", "");
+    let mut field = GuiField::new("so ", "");
     // The paste itself brings no bar up; the next letter does, for the whole word
     assert!(shows(&field.paste("prog")).is_empty());
     let act = field.type_text("r");

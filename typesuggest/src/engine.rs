@@ -2,7 +2,7 @@ use crate::config::{BarPosition, Config, ConfigSource, NumberSelect};
 use crate::dict::{Dictionary, write_user_bigrams_file};
 use crate::security::{
     get_hyprland_active_window, get_hyprland_max_monitor_extent, has_sensitive_descendant,
-    is_sensitive_window, is_session_locked,
+    is_sensitive_window, is_session_locked, terminal_foreground,
 };
 use crate::shm::{BUFFER_SCALE, draw_pixmap_to_surface, hide_surface};
 use crate::state::{InputMode, KeyAction, StateMachine, is_modifier_keysym, number_key_index};
@@ -455,6 +455,11 @@ impl Engine {
                 self.active_window_pid = Some(win.pid);
                 // Focus can move between windows without a new activation
                 self.set_app_disabled(self.config.is_disabled_app(&win.class));
+
+                // Whether the first word typed here is a shell command or a sentence
+                if self.config.capitalize_sentences {
+                    self.state_machine.terminal = terminal_foreground(win.pid);
+                }
 
                 // Layer 3: Title & Class check
                 if is_sensitive_window(&win.title, &win.class) {
@@ -1318,6 +1323,11 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for Engine {
                 if let Some(win) = get_hyprland_active_window() {
                     state.active_window_pid = Some(win.pid);
                     disabled = state.config.is_disabled_app(&win.class);
+                    state.state_machine.terminal = if state.config.capitalize_sentences {
+                        terminal_foreground(win.pid)
+                    } else {
+                        Default::default()
+                    };
                 }
                 state.set_app_disabled(disabled);
                 state.refresh_sensitivity();

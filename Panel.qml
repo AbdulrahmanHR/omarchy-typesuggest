@@ -29,6 +29,7 @@ Panel {
   //   number         Off, Alt, Ctrl, Alone (when typesuggest reports number_select)
   //   tabfirst       switch row (when typesuggest reports tab_accepts_first)
   //   predict        switch row (when typesuggest reports predict_next_word)
+  //   capitalize     switch row (when typesuggest reports capitalize_sentences)
   //   learn, typo    switch rows
   //   offensive      switch row (when typesuggest reports filter_offensive)
   //   hover          switch row (when typesuggest reports hover_highlight)
@@ -106,6 +107,8 @@ Panel {
   readonly property bool tabFirstSupported: typeof root.config.tab_accepts_first === "boolean"
   // Likewise for predict_next_word
   readonly property bool predictSupported: typeof root.config.predict_next_word === "boolean"
+  // Likewise for capitalize_sentences
+  readonly property bool capitalizeSupported: typeof root.config.capitalize_sentences === "boolean"
   // Likewise for number_select
   readonly property bool numberSelectSupported: typeof root.config.number_select === "string"
   // Likewise for filter_offensive
@@ -123,6 +126,7 @@ Panel {
       if (numberSelectSupported) list.push("number")
       if (tabFirstSupported) list.push("tabfirst")
       if (predictSupported) list.push("predict")
+      if (capitalizeSupported) list.push("capitalize")
       list = list.concat(["learn", "typo"])
       if (offensiveFilterSupported) list.push("offensive")
       if (mouseSettingsSupported) list.push("hover")
@@ -205,6 +209,7 @@ Panel {
     else if (focusSection === "number") typesuggest.setOption("number_select", Model.numberSelects()[i])
     else if (focusSection === "tabfirst") typesuggest.setOption("tab_accepts_first", !root.config.tab_accepts_first)
     else if (focusSection === "predict") typesuggest.setOption("predict_next_word", !root.config.predict_next_word)
+    else if (focusSection === "capitalize") typesuggest.setOption("capitalize_sentences", !root.config.capitalize_sentences)
     else if (focusSection === "learn") typesuggest.setOption("learn", !root.config.learn)
     else if (focusSection === "typo") typesuggest.setOption("typo_correction", !root.config.typo_correction)
     else if (focusSection === "offensive") typesuggest.setOption("filter_offensive", !root.config.filter_offensive)
@@ -676,6 +681,16 @@ Panel {
               caption: "Suggest the next word before you type it"
               checked: root.config.predict_next_word === true
               onToggled: typesuggest.setOption("predict_next_word", !root.config.predict_next_word)
+            }
+
+            SwitchRow {
+              visible: root.capitalizeSupported
+              width: parent.width
+              section: "capitalize"
+              title: "Capitalize sentences"
+              caption: "Start suggestions with a capital at a sentence start"
+              checked: root.config.capitalize_sentences === true
+              onToggled: typesuggest.setOption("capitalize_sentences", !root.config.capitalize_sentences)
             }
 
             SwitchRow {

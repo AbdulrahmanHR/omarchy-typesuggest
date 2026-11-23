@@ -259,6 +259,9 @@ fn print_help() {
     println!("    predict_next_word = true | false Suggest the next word after a space, before");
     println!("                                     typing any of it (false)");
     println!(
+        "    capitalize_sentences = true | false Capitalize suggestions at a sentence start (true)"
+    );
+    println!(
         "    hover_highlight = true | false   Highlight the suggestion under the mouse (true)"
     );
     println!("    mouse_hides_bar = true | false   Above the caret: hide the bar when the mouse");
@@ -581,6 +584,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  - Predict next word: {}",
         if config.predict_next_word {
+            "on"
+        } else {
+            "off"
+        }
+    );
+    println!(
+        "  - Capitalize sentences: {}",
+        if config.capitalize_sentences {
             "on"
         } else {
             "off"

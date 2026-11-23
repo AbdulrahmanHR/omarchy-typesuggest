@@ -32,6 +32,8 @@ pub struct Config {
     pub trailing_space: bool,
     /// Offer the likely next word after a space, before any letter of it is typed
     pub predict_next_word: bool,
+    /// Capitalize the first letter of suggestions at the start of a sentence
+    pub capitalize_sentences: bool,
     /// Highlight the suggestion under the mouse the way the keyboard selection is drawn
     pub hover_highlight: bool,
     /// With `bar_position = "above"`: hide the bar as soon as the mouse moves over the empty
@@ -226,6 +228,7 @@ const SETTABLE_KEYS: &[(&str, &[&str])] = &[
     ("number_select", &[]),
     ("trailing_space", &[]),
     ("predict_next_word", &[]),
+    ("capitalize_sentences", &["capitalize"]),
     ("hover_highlight", &[]),
     ("mouse_hides_bar", &[]),
     ("typo_correction", &[]),
@@ -256,10 +259,15 @@ pub fn config_line(key: &str, value: &str) -> Result<String, String> {
     };
 
     let stored = match key {
-        "learn" | "tab_accepts_first" | "trailing_space" | "predict_next_word"
-        | "typo_correction" | "filter_offensive" | "hover_highlight" | "mouse_hides_bar" => {
-            parse_bool()?.to_string()
-        }
+        "learn"
+        | "tab_accepts_first"
+        | "trailing_space"
+        | "predict_next_word"
+        | "capitalize_sentences"
+        | "typo_correction"
+        | "filter_offensive"
+        | "hover_highlight"
+        | "mouse_hides_bar" => parse_bool()?.to_string(),
         "min_prefix_length" | "max_candidates" => {
             let max = if key == "max_candidates" { 5 } else { 10 };
             let n = value.parse::<usize>().map_err(|_| invalid())?;
@@ -407,6 +415,7 @@ impl Default for Config {
             number_select: NumberSelect::Off,
             trailing_space: true,
             predict_next_word: false,
+            capitalize_sentences: true,
             hover_highlight: true,
             mouse_hides_bar: false,
             disabled_apps: Vec::new(),
@@ -533,6 +542,11 @@ impl Config {
                             self.predict_next_word = b;
                         }
                     }
+                    "capitalize_sentences" => {
+                        if let Ok(b) = val.parse::<bool>() {
+                            self.capitalize_sentences = b;
+                        }
+                    }
                     "hover_highlight" => {
                         if let Ok(b) = val.parse::<bool>() {
                             self.hover_highlight = b;
@@ -583,7 +597,7 @@ impl Config {
         };
         let apps: Vec<&str> = self.disabled_apps.iter().map(String::as_str).collect();
         format!(
-            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"tab_accepts_first\":{},\"number_select\":{},\"trailing_space\":{},\"predict_next_word\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"filter_offensive\":{},\"disabled_apps\":{},\"font\":{}}}",
+            "{{\"learn\":{},\"min_prefix_length\":{},\"max_candidates\":{},\"bar_scale\":{},\"bar_position\":{},\"theme\":{},\"select_key\":{},\"accept_keys\":{},\"tab_accepts_first\":{},\"number_select\":{},\"trailing_space\":{},\"predict_next_word\":{},\"capitalize_sentences\":{},\"hover_highlight\":{},\"mouse_hides_bar\":{},\"typo_correction\":{},\"filter_offensive\":{},\"disabled_apps\":{},\"font\":{}}}",
             self.learn,
             self.min_prefix_length,
             self.max_candidates,
@@ -596,6 +610,7 @@ impl Config {
             json_string(self.number_select.name()),
             self.trailing_space,
             self.predict_next_word,
+            self.capitalize_sentences,
             self.hover_highlight,
             self.mouse_hides_bar,
             self.typo_correction,
@@ -673,6 +688,11 @@ trailing_space = true
 # Suggest the next word after a space, before you type any letter of it (default: false).
 # Only words that usually follow the word before are offered; Tab never takes one.
 predict_next_word = false
+
+# Capitalize the first letter of suggestions at the start of a sentence: at the start of the
+# text, after . ! ? or a new line (default: true). At a shell prompt the first word of a command
+# stays lowercase. Words you typed with a capital are left as they are.
+capitalize_sentences = true
 
 # Highlight the suggestion under the mouse, the way the keyboard selection is shown
 # (default: true). A click takes the word under the mouse either way.
@@ -1216,5 +1236,19 @@ mod tests {
         assert_eq!(source.reload_if_changed(), None);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+    #[test]
+    fn test_capitalize_sentences_option() {
+        assert!(Config::default().capitalize_sentences);
+        assert_eq!(
+            config_line("capitalize_sentences", "off").unwrap(),
+            "capitalize_sentences = false"
+        );
+        assert!(config_line("capitalize_sentences", "maybe").is_err());
+        assert!(
+            Config::default()
+                .to_json()
+                .contains("\"capitalize_sentences\":true")
+        );
     }
 }
