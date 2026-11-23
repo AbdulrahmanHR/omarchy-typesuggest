@@ -252,6 +252,91 @@ pub fn has_sensitive_descendant(root_pid: u32) -> bool {
     false
 }
 
+/// What a terminal window is running in the foreground, which decides whether the start of the
+/// text typed there is the start of a sentence
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TerminalForeground {
+    /// No process of the window owns a terminal in the foreground: not a terminal, or one
+    /// whose shell is not below the window's process (a server mode)
+    #[default]
+    NotTerminal,
+    /// A shell (or a multiplexer, whose panes cannot be told apart): the first word typed is
+    /// a command
+    Shell,
+    /// Another program owns the terminal (Claude Code, an editor): the first word is text
+    Program,
+}
+
+/// Process names that read a command line: shells, and multiplexers that may hold one
+fn is_shell_comm(comm: &str) -> bool {
+    matches!(
+        comm.trim().trim_start_matches('-'),
+        "bash"
+            | "zsh"
+            | "fish"
+            | "sh"
+            | "dash"
+            | "nu"
+            | "ash"
+            | "ksh"
+            | "tcsh"
+            | "csh"
+            | "elvish"
+            | "xonsh"
+            | "tmux: client"
+            | "screen"
+            | "zellij"
+    )
+}
+
+/// What the names of the processes in the foreground of a window's terminals add up to. Any
+/// shell wins: with several tabs, which one has the focus is not known, and a command left
+/// lowercase is a smaller fault than a capital typed into a shell.
+pub fn classify_foreground(comms: &[String]) -> TerminalForeground {
+    if comms.is_empty() {
+        TerminalForeground::NotTerminal
+    } else if comms.iter().any(|c| is_shell_comm(c)) {
+        TerminalForeground::Shell
+    } else {
+        TerminalForeground::Program
+    }
+}
+
+/// Whether a /proc/PID/stat line is of a process that owns its controlling terminal's
+/// foreground: its process group is the terminal's foreground group
+fn is_tty_foreground(stat: &str) -> bool {
+    // The name in parentheses may hold spaces and parentheses; the fields after the last ")"
+    // are state, ppid, pgrp, session, tty_nr, tpgid
+    let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
+        return false;
+    };
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    match (fields.get(2), fields.get(4), fields.get(5)) {
+        (Some(pgrp), Some(tty), Some(tpgid)) => {
+            *tty != "0" && *tpgid != "-1" && *tpgid != "0" && pgrp == tpgid
+        }
+        _ => false,
+    }
+}
+
+/// What the terminal window of `root_pid` has in the foreground, from /proc: the descendants
+/// whose process group is the foreground group of their terminal. Not reliable for a window
+/// whose shell is not one of its descendants (footclient), which reads as `NotTerminal`.
+pub fn terminal_foreground(root_pid: u32) -> TerminalForeground {
+    if root_pid == 0 {
+        return TerminalForeground::NotTerminal;
+    }
+    let comms: Vec<String> = process_tree(root_pid)
+        .into_iter()
+        .filter(|&pid| pid != root_pid)
+        .filter(|pid| {
+            fs::read_to_string(format!("/proc/{}/stat", pid)).is_ok_and(|s| is_tty_foreground(&s))
+        })
+        .filter_map(comm)
+        .collect();
+    classify_foreground(&comms)
+}
+
 /// `root_pid` and its descendants (children of every thread, since terminals may start the
 /// shell from a worker thread), up to MAX_TREE_PROCESSES
 fn process_tree(root_pid: u32) -> Vec<u32> {
@@ -463,5 +548,64 @@ mod tests {
             "org.omarchy.agent"
         ));
         assert!(!is_sensitive_window("Google Chrome", "google-chrome"));
+    }
+}
+
+#[cfg(test)]
+mod foreground_tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_foreground_is_classified_by_its_process_names() {
+        assert_eq!(classify_foreground(&[]), TerminalForeground::NotTerminal);
+        for shell in [
+            "bash",
+            "zsh",
+            "fish",
+            "sh",
+            "dash",
+            "nu",
+            "-bash",
+            "tmux: client",
+        ] {
+            assert_eq!(
+                classify_foreground(&names(&[shell])),
+                TerminalForeground::Shell,
+                "{shell}"
+            );
+        }
+        for program in ["node", "claude", "nvim", "python3"] {
+            assert_eq!(
+                classify_foreground(&names(&[program])),
+                TerminalForeground::Program,
+                "{program}"
+            );
+        }
+        // One tab at a shell prompt is enough to keep commands lowercase
+        assert_eq!(
+            classify_foreground(&names(&["node", "zsh"])),
+            TerminalForeground::Shell
+        );
+    }
+
+    #[test]
+    fn test_tty_foreground_is_read_from_the_stat_line() {
+        // pgrp 500 is the foreground group (tpgid 500) of terminal 34816
+        assert!(is_tty_foreground(
+            "501 (bash) S 400 500 500 34816 500 4194304 1"
+        ));
+        // A background job: its group is not the foreground one
+        assert!(!is_tty_foreground(
+            "502 (sleep) S 501 600 500 34816 500 4194304 1"
+        ));
+        // No controlling terminal
+        assert!(!is_tty_foreground("503 (node) S 1 503 503 0 -1 4194304 1"));
+        // A name with spaces and parentheses
+        assert!(is_tty_foreground("504 (a) b) S 400 504 504 34816 504 0 1"));
+        assert!(!is_tty_foreground("garbage"));
     }
 }

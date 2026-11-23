@@ -234,6 +234,9 @@ trailing_space = true
 # Suggest the next word after a space, before you type any of it (default: false)
 predict_next_word = false
 
+# Capitalize suggestions at the start of a sentence (default: true)
+capitalize_sentences = true
+
 # Highlight the suggestion under the mouse (default: true)
 hover_highlight = true
 
@@ -269,6 +272,7 @@ font = ""
 | `number_select` | `"off"` | `"plain"`: press a suggestion's number to take it; while suggestions show, those digits no longer type (so "mp3" needs the bar dismissed first, e.g. with Escape). `"alt"` or `"ctrl"`: hold it and press a suggestion's number (digits row or keypad) to take that suggestion; each suggestion then shows its number. Only that modifier on its own counts, and only while the bar shows, so Ctrl+1 or Alt+1 reaches the app otherwise. With `"alt"`, an app that opens its menu on a lone Alt press (Firefox) may show its menu bar afterwards; `"ctrl"` avoids that. |
 | `trailing_space` | `true` | Add a space after the committed word. The accept key itself is still swallowed. |
 | `predict_next_word` | `false` | Right after a space (and after a taken suggestion), show the words that usually follow the word before, from the bigram and trigram tables and your learned phrases. Tab and a number key alone never take a prediction. |
+| `capitalize_sentences` | `true` | At the start of a sentence (start of the text, or after `.`, `!`, `?` or a new line) suggestions start with a capital, so typing "hel" offers "Hello" and taking it replaces what you typed. Not after a comma, inside a URL or file name, or when the word before the caret is unknown. At a shell prompt the first word of a command stays lowercase. Words you typed with a capital are left as they are, and learning stores the lowercase form. |
 | `hover_highlight` | `true` | Highlight the suggestion under the mouse the way the keyboard selection is shown. A click takes the word under the mouse either way. |
 | `mouse_hides_bar` | `false` | Only with `bar_position = "above"`: hide the bar as soon as the mouse moves over the empty area above it, so a click there always reaches the text. Off, the bar stays until that area is clicked. |
 | `disabled_apps` | none | Window classes where TypeSuggest does nothing at all, e.g. `code, org.wezfurlong.wezterm` or `["code", "steam*"]`. Matching is case-insensitive and a trailing `*` matches any suffix. Find a window's class with `hyprctl activewindow`. |

@@ -40,6 +40,7 @@ function defaultConfig() {
     accept_keys: acceptKeyNames(),
     tab_accepts_first: false,
     predict_next_word: false,
+    capitalize_sentences: true,
     number_select: "off",
     trailing_space: true,
     hover_highlight: true,
@@ -91,6 +92,8 @@ function normalizeConfig(data) {
     tab_accepts_first: typeof data.tab_accepts_first === "boolean" ? data.tab_accepts_first : null,
     // null when the installed typesuggest predates predict_next_word
     predict_next_word: typeof data.predict_next_word === "boolean" ? data.predict_next_word : null,
+    // null when the installed typesuggest predates capitalize_sentences
+    capitalize_sentences: typeof data.capitalize_sentences === "boolean" ? data.capitalize_sentences : null,
     // null when the installed typesuggest predates number_select
     number_select: data.number_select === undefined ? null : pick(data.number_select, numberSelects(), base.number_select),
     trailing_space: typeof data.trailing_space === "boolean" ? data.trailing_space : base.trailing_space,

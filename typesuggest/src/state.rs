@@ -1,5 +1,6 @@
 use crate::config::{AcceptKeys, Config, SelectKey};
 use crate::dict::{Context, Dictionary};
+use crate::security::TerminalForeground;
 
 // Standard XKB keysym constants
 const KEY_UP: u32 = 0xff52;
@@ -301,6 +302,46 @@ pub fn extract_context_from_slice(before_word: &str) -> Context {
     context_before(&chars, chars.len())
 }
 
+/// Whether the text before a full stop ends in something that is not the end of a sentence: an
+/// abbreviation ("Mr", "etc"), a single letter or a dotted initialism ("e.g", "U.S"), or a
+/// further full stop (an ellipsis, a file name)
+fn ends_in_abbreviation(before_dot: &[char]) -> bool {
+    let token: String = before_dot
+        .iter()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || **c == '.')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let lower = token.to_lowercase();
+    token.is_empty() && before_dot.last() == Some(&'.')
+        || token.contains('.')
+        || (token.chars().count() == 1 && token.chars().all(char::is_alphabetic))
+        || [
+            "mr", "mrs", "ms", "dr", "prof", "vs", "etc", "inc", "jr", "sr", "st", "no",
+        ]
+        .contains(&lower.as_str())
+}
+
+/// Spell `candidate` with a leading capital when `prefix` was typed in lower case: words a
+/// dictionary spells with capitals already ("London", "FBI", "I") and mixed spellings
+/// ("iPhone") are left as they are
+fn capitalize_candidate(prefix: &str, candidate: String) -> String {
+    let typed_lowercase = prefix.chars().next().is_none_or(char::is_lowercase);
+    let mut chars = candidate.chars();
+    match chars.next() {
+        Some(first)
+            if typed_lowercase
+                && first.is_lowercase()
+                && !chars.as_str().chars().any(char::is_uppercase) =>
+        {
+            first.to_uppercase().collect::<String>() + chars.as_str()
+        }
+        _ => candidate,
+    }
+}
+
 /// Detect whether a command line invokes a sensitive command that prompts for credentials/passwords.
 pub fn is_sensitive_command_line(line: &str) -> bool {
     let trimmed = line.trim();
@@ -496,6 +537,42 @@ impl InputBuffer {
             })
     }
 
+    /// Whether the word at the caret begins a sentence: only whitespace (and opening quotes or
+    /// brackets) lies between it and the start of the text, a full stop, `!` or `?` (followed
+    /// by closing quotes or brackets), or a line break. `start_counts` says whether the start
+    /// of the buffer is a sentence start; it is not when the text before it is unknown, which
+    /// is checked here as well. Not a word joined to code or inside an identifier ("a.b",
+    /// "get_jo", "myProg"), and not after an abbreviation ("e.g. ", "Mr. ").
+    pub fn starts_sentence(&self, start_counts: bool) -> bool {
+        let (word_start, segment_begin) = self.word_and_segment_start();
+        if segment_begin > word_start || self.joined_to_code() {
+            return false;
+        }
+        let before = &self.chars[..word_start];
+        let mut i = word_start;
+        let mut spaced = false;
+        while i > 0 {
+            let c = before[i - 1];
+            if c == '\n' {
+                return true;
+            }
+            if c.is_whitespace() {
+                spaced = true;
+            } else if !"\"'\u{2018}\u{2019}\u{201c}\u{201d}\u{ab}\u{bb}()[]{}".contains(c) {
+                break;
+            }
+            i -= 1;
+        }
+        if i == 0 {
+            return start_counts && !self.unknown_start;
+        }
+        match before[i - 1] {
+            '!' | '?' => spaced,
+            '.' => spaced && !ends_in_abbreviation(&before[..i - 1]),
+            _ => false,
+        }
+    }
+
     /// Extract the current word prefix immediately preceding the cursor, and the
     /// two words before it that condition the completion
     pub fn current_word_context(&self) -> (String, Context) {
@@ -619,6 +696,11 @@ pub struct StateMachine {
     pub trailing_space: bool,
     /// Offer the likely next word after a space, before any letter of it is typed
     pub predict_next_word: bool,
+    /// Start suggestions with a capital where a sentence starts
+    pub capitalize_sentences: bool,
+    /// What the focused terminal runs in the foreground (set by the engine): at a shell
+    /// prompt the start of the line is a command, not a sentence
+    pub terminal: TerminalForeground,
     /// Last (prefix, context, typo fallback) lookup and its result. GUI apps echo each
     /// keystroke back as surrounding text, which would otherwise repeat the same lookup
     /// two or three times.
@@ -647,6 +729,8 @@ impl StateMachine {
             tab_accepts_first: false,
             trailing_space: true,
             predict_next_word: false,
+            capitalize_sentences: true,
+            terminal: TerminalForeground::default(),
             last_suggestion: None,
             editing: Editing::No,
             reported: None,
@@ -662,9 +746,34 @@ impl StateMachine {
         self.tab_accepts_first = config.tab_accepts_first;
         self.trailing_space = config.trailing_space;
         self.predict_next_word = config.predict_next_word;
+        self.capitalize_sentences = config.capitalize_sentences;
         self.invalidate_suggestions();
         // The next report is looked up again with the new settings, even if the text is the same
         self.reported = None;
+    }
+
+    /// Whether the start of the text before the caret is the start of a sentence. At a shell
+    /// prompt it is a command. In another terminal program (Claude Code) it is text. Elsewhere
+    /// it is only where the app reports its text, so that the buffer's start is the field's;
+    /// for an app that does not, the buffer starts wherever the user began typing.
+    fn start_counts(&self) -> bool {
+        match self.terminal {
+            TerminalForeground::Shell => false,
+            TerminalForeground::Program => true,
+            TerminalForeground::NotTerminal => self.reported.is_some(),
+        }
+    }
+
+    /// Start the suggestions for `prefix` with a capital when the caret is at the start of a
+    /// sentence (see [`InputBuffer::starts_sentence`])
+    fn sentence_case(&self, prefix: &str, candidates: Vec<String>) -> Vec<String> {
+        if !self.capitalize_sentences || !self.buffer.starts_sentence(self.start_counts()) {
+            return candidates;
+        }
+        candidates
+            .into_iter()
+            .map(|c| capitalize_candidate(prefix, c))
+            .collect()
     }
 
     /// Memoized `Dictionary::suggest` for the current prefix and context. A later segment
@@ -682,7 +791,7 @@ impl StateMachine {
             && c == ctx
             && *t == whole_word
         {
-            return candidates.clone();
+            return self.sentence_case(prefix, candidates.clone());
         }
         let candidates = dict.suggest_with(prefix, ctx, self.max_candidates, whole_word);
         self.last_suggestion = Some((
@@ -691,7 +800,7 @@ impl StateMachine {
             whole_word,
             candidates.clone(),
         ));
-        candidates
+        self.sentence_case(prefix, candidates)
     }
 
     /// With `predict_next_word`, the likely next words when the caret sits where one starts
@@ -2654,6 +2763,7 @@ mod tests {
     fn test_pasted_part_of_a_word_is_completed_once_the_app_reports_it() {
         let dict = setup_dict();
         let mut sm = StateMachine::new(3);
+        sm.capitalize_sentences = false;
         report(&mut sm, &dict, "", 0);
         sm.handle_key_press(0x0076, None, true, &dict); // Ctrl+V
         let act = report(&mut sm, &dict, "prog", 4);
@@ -2758,6 +2868,7 @@ mod tests {
         ] {
             // The caret is in front of `after` while "pro" is typed
             let mut sm = StateMachine::new(3);
+            sm.capitalize_sentences = false;
             report(&mut sm, &dict, after, 0);
             let mut before = String::new();
             for c in "pro".chars() {
@@ -3366,5 +3477,227 @@ mod tests {
         assert_eq!(act, KeyAction::SensitiveCommandSubmitted);
         assert_eq!(sm.mode, InputMode::Idle);
         assert!(sm.buffer.chars.is_empty());
+    }
+    // ---- Capitalizing suggestions at the start of a sentence ----
+
+    fn sentence_dict() -> Dictionary {
+        let mut dict = Dictionary::from_frequency_text(
+            "hello 900\nhelp 800\nhelmet 100\nlondon 300\nlook 400\nlot 200\nfbi 150\nfew 140\niphone 120\nmorning 100\ngood 500\nit 300\nin 200\nmake 300\nmaybe 250",
+        );
+        dict.load_proper_nouns("London\nFBI\niPhone\n");
+        dict.load_bigrams_tsv("good\tmorning\t1000000");
+        dict
+    }
+
+    /// A machine that has been told the app's text (the start of the buffer is the field's)
+    fn reporting() -> StateMachine {
+        let mut sm = StateMachine::new(3);
+        sm.reported = Some((String::new(), 0, 0));
+        sm
+    }
+
+    fn first_shown(sm: &mut StateMachine, dict: &Dictionary, text: &str) -> Vec<String> {
+        shown_words(&type_keys(sm, dict, text)).unwrap_or_default()
+    }
+
+    #[test]
+    fn test_suggestions_are_capitalized_at_the_start_of_the_text() {
+        let dict = sentence_dict();
+        let mut sm = reporting();
+        assert_eq!(
+            first_shown(&mut sm, &dict, "hel"),
+            vec!["Hello", "Help", "Helmet"]
+        );
+    }
+
+    #[test]
+    fn test_suggestions_are_capitalized_after_sentence_enders() {
+        let dict = sentence_dict();
+        for text in [
+            "ok. hel",
+            "ok! hel",
+            "ok? hel",
+            "ok.  hel",
+            "ok.\nhel",
+            "ok. \"hel",
+            "he said \"go.\" hel",
+            "ok?) hel",
+        ] {
+            let mut sm = StateMachine::new(3);
+            assert_eq!(first_shown(&mut sm, &dict, text)[0], "Hello", "{text:?}");
+        }
+    }
+
+    #[test]
+    fn test_suggestions_keep_their_case_elsewhere() {
+        let dict = sentence_dict();
+        for text in [
+            "ok, hel",
+            "ok: hel",
+            "ok; hel",
+            "so hel",
+            "ok.hel",
+            "x.hel",
+            "e.g. hel",
+            "Mr. hel",
+            "wait... hel",
+            "get_hel",
+            "ok -hel",
+        ] {
+            let mut sm = reporting();
+            let shown = first_shown(&mut sm, &dict, text);
+            assert_eq!(shown.first().map(String::as_str), Some("hello"), "{text:?}");
+        }
+        // Mid-sentence in a reporting app too
+        let mut sm = reporting();
+        assert_eq!(first_shown(&mut sm, &dict, "good mo")[0], "morning");
+    }
+
+    #[test]
+    fn test_start_of_text_is_not_a_sentence_start_when_it_is_unknown() {
+        let dict = sentence_dict();
+        // An app that reports nothing: the buffer may begin anywhere in a document
+        let mut sm = StateMachine::new(3);
+        assert_eq!(first_shown(&mut sm, &dict, "hel")[0], "hello");
+        // Text before the buffer is unknown (a paste, a long report)
+        let mut sm = reporting();
+        sm.buffer.forget();
+        assert!(first_shown(&mut sm, &dict, "hel").is_empty());
+        let mut sm = reporting();
+        sm.buffer.forget();
+        assert_eq!(first_shown(&mut sm, &dict, " hel")[0], "hello");
+        // ...but a boundary after it is known
+        let mut sm = reporting();
+        sm.buffer.forget();
+        assert_eq!(first_shown(&mut sm, &dict, "ok. hel")[0], "Hello");
+    }
+
+    #[test]
+    fn test_sentence_start_at_a_shell_prompt_and_in_other_terminal_programs() {
+        let dict = sentence_dict();
+        // A shell: the first word is a command, but a sentence after ". " still counts
+        let mut sm = StateMachine::new(3);
+        sm.terminal = TerminalForeground::Shell;
+        sm.reported = Some((String::new(), 0, 0));
+        assert_eq!(first_shown(&mut sm, &dict, "ma")[0], "make");
+        assert_eq!(first_shown(&mut sm, &dict, "ok. ma")[0], "Make");
+        // Claude Code (node) in a terminal that reports no text
+        let mut sm = StateMachine::new(3);
+        sm.terminal = TerminalForeground::Program;
+        assert_eq!(first_shown(&mut sm, &dict, "ma")[0], "Make");
+    }
+
+    #[test]
+    fn test_sentence_case_leaves_the_word_the_dictionary_cased() {
+        let dict = sentence_dict();
+        // Names, acronyms and the pronoun
+        let mut sm = reporting();
+        assert_eq!(first_shown(&mut sm, &dict, "lon")[0], "London");
+        let mut sm = reporting();
+        assert_eq!(first_shown(&mut sm, &dict, "fb")[0], "FBI");
+        let mut sm = reporting();
+        assert_eq!(first_shown(&mut sm, &dict, "iph")[0], "iPhone");
+        // Typed capitals and all capitals are handled as before
+        let mut sm = reporting();
+        assert_eq!(first_shown(&mut sm, &dict, "Hel")[0], "Hello");
+        let mut sm = reporting();
+        assert_eq!(first_shown(&mut sm, &dict, "HEL")[0], "HELLO");
+        // "i" stays the pronoun in the middle of a sentence
+        assert_eq!(capitalize_candidate("i", "I".to_string()), "I");
+        assert_eq!(capitalize_candidate("", "hello".to_string()), "Hello");
+        assert_eq!(capitalize_candidate("hel", "iPhone".to_string()), "iPhone");
+        assert_eq!(capitalize_candidate("Hel", "hello".to_string()), "hello");
+    }
+
+    #[test]
+    fn test_sentence_case_off_keeps_the_old_behavior() {
+        let dict = sentence_dict();
+        let mut sm = reporting();
+        sm.capitalize_sentences = false;
+        assert_eq!(first_shown(&mut sm, &dict, "hel")[0], "hello");
+        assert_eq!(first_shown(&mut sm, &dict, "ok. hel")[0], "hello");
+    }
+
+    #[test]
+    fn test_sentence_case_follows_the_config() {
+        let mut sm = StateMachine::new(3);
+        assert!(sm.capitalize_sentences);
+        let config = Config {
+            capitalize_sentences: false,
+            ..Config::default()
+        };
+        sm.apply_config(&config);
+        assert!(!sm.capitalize_sentences);
+    }
+
+    #[test]
+    fn test_committing_a_capitalized_suggestion_replaces_the_lowercase_prefix() {
+        let dict = sentence_dict();
+        let mut sm = reporting();
+        type_keys(&mut sm, &dict, "hel");
+        sm.handle_key_press(KEY_UP, None, false, &dict);
+        let act = sm.handle_key_press(KEY_RETURN, None, false, &dict);
+        assert_eq!(
+            act,
+            KeyAction::CommitCandidate {
+                deleted_before: "hel".to_string(),
+                deleted_after: String::new(),
+                replacement: "Hello ".to_string(),
+                prev_word: None,
+                chosen_word: "Hello".to_string(),
+            }
+        );
+        assert_eq!(sm.buffer.chars.iter().collect::<String>(), "Hello ");
+    }
+
+    #[test]
+    fn test_sentence_case_applies_to_text_the_app_reports() {
+        let dict = sentence_dict();
+        let mut sm = StateMachine::new(3);
+        sm.editing = Editing::BeforeCaret;
+        let text = "It is. hel";
+        let act = sm.handle_surrounding_text(text, text.len(), text.len(), &dict);
+        assert_eq!(shown_words(&act).unwrap()[0], "Hello");
+        let mut sm = StateMachine::new(3);
+        sm.editing = Editing::BeforeCaret;
+        let act = sm.handle_surrounding_text("hel", 3, 3, &dict);
+        assert_eq!(shown_words(&act).unwrap()[0], "Hello");
+        let mut sm = StateMachine::new(3);
+        sm.editing = Editing::BeforeCaret;
+        let act = sm.handle_surrounding_text("in it, hel", 10, 10, &dict);
+        assert_eq!(shown_words(&act).unwrap()[0], "hello");
+    }
+
+    #[test]
+    fn test_predictions_at_a_sentence_start_are_capitalized() {
+        // Predictions are only offered after a word and a space, never after a full stop, so
+        // the case function is checked directly on an empty prefix at a sentence start
+        let dict = sentence_dict();
+        let mut sm = reporting();
+        sm.buffer.clear();
+        for c in "ok. ".chars() {
+            sm.buffer.insert_char(c);
+        }
+        assert_eq!(
+            sm.sentence_case("", vec!["good".to_string(), "it".to_string()]),
+            vec!["Good", "It"]
+        );
+        // Mid-sentence they stay as they are
+        let mut sm = predicting();
+        let act = type_keys(&mut sm, &dict, "good ");
+        assert_eq!(shown_words(&act), Some(vec!["morning".to_string()]));
+    }
+
+    #[test]
+    fn test_a_capitalized_sentence_start_commit_is_learned_in_lowercase() {
+        let mut dict = sentence_dict();
+        // What the engine records for "Good morning" taken at a sentence start: the chosen
+        // word as shown and the lowercase context word
+        dict.record_user_bigram("Good", "Morning");
+        dict.record_user_bigram("good", "Help");
+        let saved = dict.user_bigrams_tsv();
+        assert!(saved.contains("good\tmorning"), "{saved}");
+        assert!(saved.contains("good\thelp"), "{saved}");
+        assert!(!saved.contains('M') && !saved.contains('H'), "{saved}");
     }
 }
