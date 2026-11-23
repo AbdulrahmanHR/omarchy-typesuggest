@@ -38,7 +38,8 @@ const fn build_adjacency() -> [[bool; 26]; 26] {
         let mut b = 0;
         while b < 26 {
             if a != b
-                && let (Some((ra, ia)), Some((rb, ib))) = (key_pos(b'a' + a as u8), key_pos(b'a' + b as u8))
+                && let (Some((ra, ia)), Some((rb, ib))) =
+                    (key_pos(b'a' + a as u8), key_pos(b'a' + b as u8))
             {
                 let dy = ra.abs_diff(rb);
                 let xa = ia as f32 + ROW_OFFSET[ra];
@@ -56,7 +57,9 @@ const fn build_adjacency() -> [[bool; 26]; 26] {
 static ADJACENT: [[bool; 26]; 26] = build_adjacency();
 
 fn adjacent(a: char, b: char) -> bool {
-    a.is_ascii_lowercase() && b.is_ascii_lowercase() && ADJACENT[(a as u8 - b'a') as usize][(b as u8 - b'a') as usize]
+    a.is_ascii_lowercase()
+        && b.is_ascii_lowercase()
+        && ADJACENT[(a as u8 - b'a') as usize][(b as u8 - b'a') as usize]
 }
 
 fn is_vowel(c: char) -> bool {
@@ -97,15 +100,31 @@ pub fn weighted_prefix_distance(q: &[char], w: &[char], cap: u16) -> u16 {
     // Rows i-2, i-1, i
     let mut rows = [[0u16; 36]; 3];
     for j in 1..=wl {
-        let ins = if j >= 2 && w[j - 1] == w[j - 2] { DOUBLE } else { FULL };
-        let ins = if j == 1 { ins + FIRST_LETTER_EXTRA } else { ins };
+        let ins = if j >= 2 && w[j - 1] == w[j - 2] {
+            DOUBLE
+        } else {
+            FULL
+        };
+        let ins = if j == 1 {
+            ins + FIRST_LETTER_EXTRA
+        } else {
+            ins
+        };
         rows[0][j] = rows[0][j - 1] + ins;
     }
     let mut prev_min = 0u16;
     for i in 1..=ql {
         let (cur, prev, prev2) = (i % 3, (i + 2) % 3, (i + 1) % 3);
-        let del = if i >= 2 && q[i - 1] == q[i - 2] { DOUBLE } else { FULL };
-        let del = if i == 1 { del + FIRST_LETTER_EXTRA } else { del };
+        let del = if i >= 2 && q[i - 1] == q[i - 2] {
+            DOUBLE
+        } else {
+            FULL
+        };
+        let del = if i == 1 {
+            del + FIRST_LETTER_EXTRA
+        } else {
+            del
+        };
         rows[cur][0] = rows[prev][0] + del;
         let mut row_min = rows[cur][0];
         for j in 1..=wl {
@@ -113,8 +132,16 @@ pub fn weighted_prefix_distance(q: &[char], w: &[char], cap: u16) -> u16 {
             if sub > 0 && i == 1 && j == 1 {
                 sub += FIRST_LETTER_EXTRA;
             }
-            let ins = if j >= 2 && w[j - 1] == w[j - 2] { DOUBLE } else { FULL };
-            let ins = if j == 1 { ins + FIRST_LETTER_EXTRA } else { ins };
+            let ins = if j >= 2 && w[j - 1] == w[j - 2] {
+                DOUBLE
+            } else {
+                FULL
+            };
+            let ins = if j == 1 {
+                ins + FIRST_LETTER_EXTRA
+            } else {
+                ins
+            };
             let mut v = (rows[prev][j - 1] + sub)
                 .min(rows[prev][j] + del)
                 .min(rows[cur][j - 1] + ins);

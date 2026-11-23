@@ -1,6 +1,9 @@
 //! Typo-correction accuracy / latency eval.
 //!
-//!   cargo run --release --example typo_eval [mode]
+//!   cargo run --release --example typo_eval
+//!   VERBOSE=1 shows misses; MARGIN=<nats> overrides the show margin; SLOW=1 lists slow queries
+//!
+//! The baseline is the literal prefix completions alone (typo correction off).
 //!
 //! Hand-written set (data/typo_eval.tsv) plus a seeded synthetic set made from the vocabulary.
 
@@ -41,7 +44,7 @@ fn neighbours(c: char) -> Vec<char> {
             }
             for dr in [-1i32, 1] {
                 let rr = r as i32 + dr;
-                if rr < 0 || rr >= 3 {
+                if !(0..3).contains(&rr) {
                     continue;
                 }
                 let other: Vec<char> = ROWS[rr as usize].chars().collect();
@@ -85,18 +88,26 @@ fn corrupt(word: &str, rng: &mut Rng) -> String {
     c.into_iter().collect()
 }
 
+fn pct(a: usize, n: usize) -> f64 {
+    100.0 * a as f64 / n.max(1) as f64
+}
+
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_default();
     let t = Instant::now();
     let mut dict = Dictionary::embedded();
     let load = t.elapsed();
-    if mode == "off" {
-        dict.set_typo_correction(false);
-    }
     let t2 = Instant::now();
     dict.build_sym_keys();
-    dict.set_typo_mode(&mode);
-    println!("set_typo_mode (index build): {:?}", t2.elapsed());
+    let build = t2.elapsed();
+    let rss1 = rss_kb();
+    println!(
+        "load={load:?} index rebuild={build:?} RSS={rss1} kB, typo index={} kB",
+        dict.typo_index_bytes() / 1024
+    );
+    let margin: Option<f64> = std::env::var("MARGIN").ok().and_then(|m| m.parse().ok());
+    if let Some(m) = margin {
+        dict.set_typo_show_margin(m);
+    }
 
     let freq_text = include_str!("../data/en_50k.txt");
     let vocab: Vec<&str> = freq_text
@@ -155,17 +166,11 @@ fn main() {
     }
 
     let ctx = Context::default();
-    let mut stats = [[0usize; 3]; 4]; // [hand-w, hand-p, syn-w, syn-p] x [n, top1, top3]
-    let mut lat: Vec<f64> = Vec::new();
     let verbose = std::env::var("VERBOSE").is_ok();
+    // [hand-w, hand-p, syn-w, syn-p] x [n, base top1, base top3, top1, top3]
+    let mut stats = [[0usize; 5]; 4];
+    let mut lat: Vec<f64> = Vec::new();
     for c in &cases {
-        let s = Instant::now();
-        let got = dict.suggest(&c.typed, &ctx, 3);
-        let us = s.elapsed().as_secs_f64() * 1e6;
-        if std::env::var("SLOW").is_ok() && us > 1000.0 {
-            println!("SLOW {:.0}us {} -> {:?}", us, c.typed, got);
-        }
-        lat.push(us);
         let hit = |w: &String| {
             if c.prefix {
                 w.to_lowercase().starts_with(&c.expected)
@@ -173,36 +178,61 @@ fn main() {
                 w.to_lowercase() == c.expected
             }
         };
+        dict.set_typo_correction(false);
+        let base = dict.suggest(&c.typed, &ctx, 3);
+        dict.set_typo_correction(true);
+        let s = Instant::now();
+        let got = dict.suggest(&c.typed, &ctx, 3);
+        let us = s.elapsed().as_secs_f64() * 1e6;
+        if std::env::var("SLOW").is_ok() && us > 1000.0 {
+            println!("SLOW {:.0}us {} -> {:?}", us, c.typed, got);
+        }
+        lat.push(us);
         let k = (c.synthetic as usize) * 2 + c.prefix as usize;
         stats[k][0] += 1;
-        if got.first().is_some_and(hit) {
-            stats[k][1] += 1;
-        }
-        if got.iter().any(hit) {
-            stats[k][2] += 1;
-        }
+        stats[k][1] += base.first().is_some_and(hit) as usize;
+        stats[k][2] += base.iter().any(hit) as usize;
+        stats[k][3] += got.first().is_some_and(hit) as usize;
+        stats[k][4] += got.iter().any(hit) as usize;
         if verbose && !got.iter().any(hit) {
             println!("MISS {:<14} want {:<14} got {:?}", c.typed, c.expected, got);
         }
     }
-    println!("mode={mode:?} load={load:?} hand={hand} synthetic={}", cases.len() - hand);
-    for (name, s) in ["hand whole", "hand prefix", "syn whole", "syn prefix"].iter().zip(stats) {
-        println!(
-            "{name:<12} n={:<5} top1={:>5.1}% top3={:>5.1}%",
-            s[0],
-            100.0 * s[1] as f64 / s[0] as f64,
-            100.0 * s[2] as f64 / s[0] as f64
-        );
-    }
-    let (n, t1, t3) = stats.iter().fold((0, 0, 0), |a, s| (a.0 + s[0], a.1 + s[1], a.2 + s[2]));
     println!(
-        "ALL          n={n:<5} top1={:>5.1}% top3={:>5.1}%",
-        100.0 * t1 as f64 / n as f64,
-        100.0 * t3 as f64 / n as f64
+        "hand={hand} synthetic={} margin={margin:?}",
+        cases.len() - hand
     );
-    // False corrections: correctly typed words and prefixes of real words must not be pushed out
-    // by a "correction" (top suggestion that does not even start with what was typed)
-    let mut fp = [[0usize; 2]; 3]; // [whole word common, whole word rare, prefix] x [n, displaced]
+    println!(
+        "{:<12} {:>5} {:>9} {:>9} {:>9} {:>9}",
+        "", "n", "base top1", "base top3", "top1", "top3"
+    );
+    let row = |name: &str, s: [usize; 5]| {
+        println!(
+            "{name:<12} {:>5} {:>8.1}% {:>8.1}% {:>8.1}% {:>8.1}%",
+            s[0],
+            pct(s[1], s[0]),
+            pct(s[2], s[0]),
+            pct(s[3], s[0]),
+            pct(s[4], s[0])
+        );
+    };
+    for (name, s) in ["hand whole", "hand prefix", "syn whole", "syn prefix"]
+        .iter()
+        .zip(stats)
+    {
+        row(name, s);
+    }
+    let mut all = [0usize; 5];
+    for s in stats {
+        for i in 0..5 {
+            all[i] += s[i];
+        }
+    }
+    row("ALL", all);
+
+    // Correctly typed words and prefixes must not be pushed out by a "correction" (top suggestion
+    // that does not even start with what was typed), and should rarely gain one in the top 3
+    let mut fp = [[0usize; 3]; 3]; // [common word, rare word, prefix] x [n, displaced, noisy]
     let mut samples: Vec<String> = Vec::new();
     let mut fr = Rng(12345);
     for _ in 0..1500 {
@@ -220,25 +250,47 @@ fn main() {
         } else {
             w.to_string()
         };
-        dict.set_typo_mode("0");
+        dict.set_typo_correction(false);
         let base = dict.suggest(&typed, &ctx, 3);
-        dict.set_typo_mode(&mode);
+        dict.set_typo_correction(true);
         let got = dict.suggest(&typed, &ctx, 3);
         fp[kind][0] += 1;
-        let literal = |v: &Vec<String>| v.first().is_some_and(|g| g.to_lowercase().starts_with(&typed));
-        if literal(&base) && !literal(&got) {
+        let literal = |g: &String| g.to_lowercase().starts_with(&typed);
+        if base.first().is_some_and(literal) && !got.first().is_some_and(literal) {
             fp[kind][1] += 1;
             if samples.len() < 25 {
-                samples.push(format!("{typed}: {:?} -> {:?}", base, got));
+                samples.push(format!("{typed}: {base:?} -> {got:?}"));
+            }
+        }
+        if got.iter().any(|g| !literal(g) && !base.contains(g)) {
+            fp[kind][2] += 1;
+            if verbose {
+                println!("  NOISE {typed}: {base:?} -> {got:?}");
             }
         }
     }
-    for (name, f) in ["common word typed", "rare word typed", "word prefix typed"].iter().zip(fp) {
-        println!("FALSE-CORRECTION {name:<18} n={:<4} top1 newly displaced vs baseline={:.1}%", f[0], 100.0 * f[1] as f64 / f[0] as f64);
+    for (name, f) in ["common word typed", "rare word typed", "word prefix typed"]
+        .iter()
+        .zip(fp)
+    {
+        println!(
+            "CORRECT INPUT {name:<18} n={:<4} top1 displaced={:.1}% top3 gains a correction (noise)={:.1}%",
+            f[0],
+            pct(f[1], f[0]),
+            pct(f[2], f[0])
+        );
     }
+    let (n, d, z) = fp
+        .iter()
+        .fold((0, 0, 0), |a, f| (a.0 + f[0], a.1 + f[1], a.2 + f[2]));
+    println!(
+        "CORRECT INPUT ALL n={n} displaced={:.2}% noise={:.1}%",
+        pct(d, n),
+        pct(z, n)
+    );
     if verbose {
         for x in samples {
-            println!("  FP {x}");
+            println!("  DISPLACED {x}");
         }
     }
     lat.sort_by(|a, b| a.total_cmp(b));
@@ -249,9 +301,15 @@ fn main() {
         lat[lat.len() * 99 / 100],
         lat[lat.len() - 1]
     );
-    if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
-        for l in s.lines().filter(|l| l.starts_with("VmRSS")) {
-            println!("{l}");
-        }
-    }
+}
+
+fn rss_kb() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmRSS"))
+                .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
+        })
+        .unwrap_or(0)
 }
