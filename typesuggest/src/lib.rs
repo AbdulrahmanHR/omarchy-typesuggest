@@ -6,4 +6,5 @@ pub mod security;
 pub mod shm;
 pub mod state;
 pub mod theme;
+pub mod typo;
 pub mod ui;

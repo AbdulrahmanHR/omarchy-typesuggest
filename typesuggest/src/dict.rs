@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::typo;
+
 #[derive(Debug, Clone, Default)]
 pub struct WordCandidate {
     pub word: String,
@@ -67,6 +69,12 @@ pub struct Dictionary {
     learn_enabled: bool,
     // Fall back to similar words (typo correction) when no word starts with the prefix
     typo_correction: bool,
+    // How far below the bar a correction may fall and still be shown (see `merge_typos`)
+    typo_show_margin: f64,
+    // Indices into `words` by first letter (frequency order), the anchor of the fast typo scan
+    by_first_letter: HashMap<char, Vec<u32>>,
+    // SymSpell-style delete keys of word prefixes: (hash, index into words), sorted
+    sym_keys: Vec<(u32, u32)>,
     // Profanity, sexual slang and slurs (data/blocked_words.txt), never suggested while
     // `filter_offensive` is on
     blocked: HashSet<String>,
@@ -169,6 +177,21 @@ const NAME_FREQUENCY: u64 = 100;
 /// a word that unigram frequency alone would not have put in front of the user.
 const UNIGRAM_POOL: usize = 15;
 
+/// Typo ranking weights (natural-log units): one full edit is worth this many nats of probability
+const TYPO_PENALTY: f64 = 4.5;
+/// How many typo candidates by frequency and distance get the full (context-aware) scoring
+const TYPO_SHORTLIST: usize = 24;
+/// Extra head start per letter a query is short of six: "lim" is far likelier a real start than "teh"
+const SHORT_QUERY_BONUS: f64 = 1.0;
+/// Head start for what the letters typed literally complete to
+const LITERAL_BONUS: f64 = 2.0;
+/// Most plausible (not strong) corrections shown beside the literal completions
+const MAX_PLAUSIBLE_TYPOS: usize = 1;
+/// A correction this close below the bar (in nats) still shows, after the best literal completion
+const TYPO_SHOW_MARGIN: f64 = 4.0;
+/// Extra head start when the typed text is itself a dictionary word
+const EXACT_WORD_BONUS: f64 = 2.0;
+
 impl Default for Dictionary {
     fn default() -> Self {
         Self::new()
@@ -191,6 +214,9 @@ impl Dictionary {
             names_only: HashSet::new(),
             learn_enabled: true,
             typo_correction: true,
+            typo_show_margin: TYPO_SHOW_MARGIN,
+            by_first_letter: HashMap::new(),
+            sym_keys: Vec::new(),
             blocked: HashSet::new(),
             filter_offensive: true,
             ranking: Ranking::default(),
@@ -208,6 +234,19 @@ impl Dictionary {
 
     pub fn is_learning_enabled(&self) -> bool {
         self.learn_enabled
+    }
+
+    /// Tuning knob for the eval harness: how many nats below the bar a correction may fall and
+    /// still be shown next to the literal completions (0 shows only the ones that beat the bar)
+    #[doc(hidden)]
+    pub fn set_typo_show_margin(&mut self, margin: f64) {
+        self.typo_show_margin = margin;
+    }
+
+    /// Bytes held by the typo delete index (for the eval harness)
+    #[doc(hidden)]
+    pub fn typo_index_bytes(&self) -> usize {
+        self.sym_keys.len() * std::mem::size_of::<(u32, u32)>()
     }
 
     pub fn set_typo_correction(&mut self, enabled: bool) {
@@ -655,6 +694,13 @@ impl Dictionary {
         self.words = Self::rebuild_node_cache(&mut self.root, "");
         self.word_letters = self.words.iter().map(|w| letter_bits(&w.word)).collect();
         self.unigram_total = self.words.iter().map(|w| w.frequency).sum();
+        self.build_sym_keys();
+        self.by_first_letter.clear();
+        for (i, w) in self.words.iter().enumerate() {
+            if let Some(c) = w.word.chars().next() {
+                self.by_first_letter.entry(c).or_default().push(i as u32);
+            }
+        }
     }
 
     fn rebuild_node_cache(node: &mut TrieNode, current_prefix: &str) -> Vec<WordCandidate> {
@@ -812,22 +858,13 @@ impl Dictionary {
             .map(|(_, word)| word.clone())
             .collect();
 
-        // 4. If exact prefix matching yielded NO candidates, fall back to similarity search!
-        //    The vocabulary is English, so only queries containing Latin letters can be near a word
+        // 4. Typo fallback
         if self.typo_correction
             && whole_word
-            && results.is_empty()
-            && lower_prefix.len() >= 2
+            && lower_prefix.chars().count() >= 2
             && lower_prefix.chars().any(|c| c.is_ascii_alphabetic())
         {
-            for cand in self.suggest_similar(&lower_prefix, ctx, limit) {
-                if cand != lower_prefix && !results.contains(&cand) && !self.is_blocked(&cand) {
-                    results.push(cand);
-                    if results.len() >= limit {
-                        break;
-                    }
-                }
-            }
+            results = self.merge_typos(&lower_prefix, ctx, limit, results);
         }
 
         // 5. Format casing to match the user's typed prefix
@@ -903,93 +940,288 @@ impl Dictionary {
         score
     }
 
-    /// Find the most similar words when exact prefix matching yields no results
-    pub fn suggest_similar(&self, query: &str, ctx: &Context, limit: usize) -> Vec<String> {
-        let q_chars: Vec<char> = query.chars().collect();
-        let q_len = q_chars.len();
-        if q_len < 2 {
-            return Vec::new();
-        }
+    /// Typo candidates for `query`, best first, each with `ln(probability) - TYPO_PENALTY * edits`.
+    fn typo_candidates(
+        &self,
+        query: &str,
+        ctx: &Context,
+        min_freq: u64,
+        loose: bool,
+    ) -> Vec<(String, f64)> {
+        let q: Vec<char> = query.chars().collect();
+        let q_len = q.len();
+        // With nothing else to show, a word two edits away is still worth offering
+        let cap = if loose && q_len >= 4 {
+            typo::cap_for(q_len).max(20)
+        } else {
+            typo::cap_for(q_len)
+        };
+        let max_missing = (cap / 10) as usize;
+        let mut found: Vec<(u32, u16)> = Vec::new(); // (index into words, distance)
+        let mut extra: Vec<(String, u16)> = Vec::new(); // followers named by the context tables
 
-        let max_dist = if q_len <= 3 { 1 } else { 2 };
-        let mut candidates: Vec<(String, u64)> = Vec::new();
-        let mut seen = HashSet::new();
-
-        // 1. Check the context tables of prev_word first (contextual priority)
-        if let Some(prev) = &ctx.prev {
-            let mut f_chars: Vec<char> = Vec::with_capacity(32);
-            let mut check_followers = |followers: &[(String, u32)]| {
-                for (follower, freq) in followers {
-                    // Same exact letter-set bound as the vocabulary scan below
-                    let letters = letter_bits(follower);
-                    if q_chars
-                        .iter()
-                        .filter(|&&c| letters & letter_bit(c) == 0)
-                        .count()
-                        > max_dist
-                    {
-                        continue;
-                    }
-                    f_chars.clear();
-                    f_chars.extend(follower.chars());
-                    let dist = min_prefix_or_word_distance(&q_chars, &f_chars, max_dist);
-                    if dist <= max_dist && seen.insert(follower.clone()) {
-                        let score = (10 - dist as u64) * 1_000_000_000 + (*freq as u64) * 100_000;
-                        candidates.push((follower.clone(), score));
-                    }
-                }
-            };
-
-            if let Some(prev_prev) = &ctx.prev_prev
-                && let Some(trigram_f) = self.trigrams.get(&(prev_prev.clone(), prev.clone()))
-            {
-                check_followers(trigram_f);
-            }
-            if let Some(user_f) = self.user_bigrams.get(prev) {
-                check_followers(user_f);
-            }
-            if let Some(bigram_f) = self.bigrams.get(prev) {
-                check_followers(bigram_f);
-            }
-        }
-
-        // 2. Scan vocabulary words
-        let min_wlen = q_len.saturating_sub(max_dist);
-        let max_wlen = q_len + 8;
-
-        // Reused across the whole vocabulary scan instead of allocating per word
-        let mut w_chars: Vec<char> = Vec::with_capacity(32);
-        for (item, &letters) in self.words.iter().zip(&self.word_letters) {
+        let mut w_chars: Vec<char> = Vec::with_capacity(40);
+        let check = |idx: usize, found: &mut Vec<(u32, u16)>, w_chars: &mut Vec<char>| {
+            let item = &self.words[idx];
             let w_len = item.word.len();
-            if w_len < min_wlen || w_len > max_wlen {
-                continue;
+            if item.frequency < min_freq {
+                return;
             }
-
-            // Same lower bound as in min_prefix_or_word_distance, but against the whole word's
-            // letters (a superset), so it never rejects a word the full check would accept
-            let missing = q_chars
-                .iter()
-                .filter(|&&c| letters & letter_bit(c) == 0)
-                .count();
-            if missing > max_dist {
-                continue;
+            if w_len + max_missing < q_len || w_len > q_len + 10 {
+                return;
             }
-
+            let letters = self.word_letters[idx];
+            let missing = q.iter().filter(|&&c| letters & letter_bit(c) == 0).count();
+            if missing > max_missing {
+                return;
+            }
             w_chars.clear();
             w_chars.extend(item.word.chars());
-            let dist = min_prefix_or_word_distance(&q_chars, &w_chars, max_dist);
-            if dist <= max_dist && !seen.contains(&item.word) {
-                seen.insert(item.word.clone());
-                let score = (10 - dist as u64) * 1_000_000_000 + item.frequency.min(500_000_000);
-                candidates.push((item.word.clone(), score));
-                if candidates.len() >= 25 && dist == 1 {
-                    break;
+            let dist = typo::weighted_prefix_distance(&q, w_chars, cap);
+            if dist <= cap {
+                found.push((idx as u32, dist));
+            }
+        };
+
+        if q_len >= 3 {
+            let mut ids = Vec::new();
+            self.sym_lookup(&q, &mut ids);
+            for idx in ids {
+                check(idx as usize, &mut found, &mut w_chars);
+            }
+        } else {
+            // Too short for the delete index: scan the words that start with the first letter
+            // typed, or with the second one (a swapped or extra first letter)
+            let mut firsts = vec![q[0]];
+            if q_len > 1 && q[1] != q[0] {
+                firsts.push(q[1]);
+            }
+            for f in firsts {
+                if let Some(bucket) = self.by_first_letter.get(&f) {
+                    for &idx in bucket {
+                        // Frequency order: nothing after this can reach `min_freq`
+                        if self.words[idx as usize].frequency < min_freq {
+                            break;
+                        }
+                        check(idx as usize, &mut found, &mut w_chars);
+                    }
                 }
             }
         }
 
-        candidates.sort_by_key(|a| std::cmp::Reverse(a.1));
-        candidates.into_iter().take(limit).map(|(w, _)| w).collect()
+        if let Some(prev) = &ctx.prev {
+            let mut lists: Vec<&Vec<(String, u32)>> = Vec::new();
+            if let Some(pp) = &ctx.prev_prev
+                && let Some(f) = self.trigrams.get(&(pp.clone(), prev.clone()))
+            {
+                lists.push(f);
+            }
+            if let Some(f) = self.user_bigrams.get(prev) {
+                lists.push(f);
+            }
+            if let Some(f) = self.bigrams.get(prev) {
+                lists.push(f);
+            }
+            for list in lists {
+                for (follower, _) in list {
+                    w_chars.clear();
+                    w_chars.extend(follower.chars());
+                    let dist = typo::weighted_prefix_distance(&q, &w_chars, cap);
+                    if dist <= cap {
+                        extra.push((follower.clone(), dist));
+                    }
+                }
+            }
+        }
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut scored: Vec<(String, f64)> = Vec::new();
+        let mut consider = |word: &str, dist: u16, scored: &mut Vec<(String, f64)>| {
+            if word == query || !seen.insert(word.to_string()) || self.is_blocked(word) {
+                return;
+            }
+            let ev = self.evidence_of(word, ctx);
+            let p = self.score(word, query, ctx, ev).max(1e-12);
+            scored.push((
+                word.to_string(),
+                p.ln() - TYPO_PENALTY * f64::from(dist) / 10.0,
+            ));
+        };
+        // Full scoring (context lookups) is dear, so only the best few by frequency and distance get it
+        if found.len() > TYPO_SHORTLIST {
+            let rough = |&(idx, dist): &(u32, u16)| {
+                (self.words[idx as usize].frequency.max(1) as f64).ln()
+                    - TYPO_PENALTY * f64::from(dist) / 10.0
+            };
+            found.select_nth_unstable_by(TYPO_SHORTLIST, |a, b| rough(b).total_cmp(&rough(a)));
+            found.truncate(TYPO_SHORTLIST);
+        }
+        for &(idx, dist) in &found {
+            consider(&self.words[idx as usize].word, dist, &mut scored);
+        }
+        for (word, dist) in &extra {
+            consider(word, *dist, &mut scored);
+        }
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored
+    }
+
+    fn sym_hash(chars: &[char], skip: usize) -> u32 {
+        let mut h: u32 = 0x811c_9dc5 ^ (chars.len() as u32);
+        for (i, &c) in chars.iter().enumerate() {
+            if i == skip {
+                continue;
+            }
+            h = (h ^ c as u32).wrapping_mul(0x0100_0193);
+        }
+        h ^ (h >> 15)
+    }
+
+    /// Keys for the first 3..=6 letters of every word: the prefix itself and each way to delete one letter
+    pub fn build_sym_keys(&mut self) {
+        let mut keys: Vec<(u32, u32)> = Vec::with_capacity(self.words.len() * 22);
+        for (idx, item) in self.words.iter().enumerate() {
+            let chars: Vec<char> = item.word.chars().take(6).collect();
+            let full = item.word.chars().count();
+            for l in 3..=6usize {
+                if l > full {
+                    break;
+                }
+                let pre = &chars[..l];
+                keys.push((Self::sym_hash(pre, usize::MAX), idx as u32));
+                for skip in 0..l {
+                    keys.push((Self::sym_hash(&pre[..l], skip), idx as u32));
+                }
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        keys.shrink_to_fit();
+        self.sym_keys = keys;
+    }
+
+    fn sym_lookup(&self, q: &[char], out: &mut Vec<u32>) {
+        let m = q.len().min(5);
+        let pre = &q[..m];
+        let mut probe = |h: u32| {
+            let start = self.sym_keys.partition_point(|&(k, _)| k < h);
+            for &(k, idx) in &self.sym_keys[start..] {
+                if k != h {
+                    break;
+                }
+                out.push(idx);
+            }
+        };
+        probe(Self::sym_hash(pre, usize::MAX));
+        for skip in 0..m {
+            probe(Self::sym_hash(pre, skip));
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// What the context tables say about `word` after `ctx`
+    fn evidence_of(&self, word: &str, ctx: &Context) -> Evidence {
+        let mut ev = Evidence::default();
+        if let Some(prev) = &ctx.prev {
+            if let Some(pp) = &ctx.prev_prev
+                && let Some(f) = self.trigrams.get(&(pp.clone(), prev.clone()))
+                && let Some((_, c)) = f.iter().find(|(w, _)| w == word)
+            {
+                ev.trigram = *c;
+            }
+            if self.learn_enabled
+                && let Some(f) = self.user_bigrams.get(prev)
+                && let Some((_, c)) = f.iter().find(|(w, _)| w == word)
+            {
+                ev.user = *c;
+            }
+            if let Some(f) = self.bigrams.get(prev)
+                && let Some((_, c)) = f.iter().find(|(w, _)| w == word)
+            {
+                ev.bigram = *c;
+            }
+        }
+        ev
+    }
+
+    /// Put typo corrections into `results` (the prefix completions of `query`).
+    /// - No completion at all: the corrections are all there is.
+    /// - A strong correction, much more probable than what the letters typed would literally
+    ///   complete to ("teh" -> "the", not "Tehran"), goes first.
+    /// - A plausible one, within `typo_show_margin` below that bar, is shown too, right after the
+    ///   best literal completion, in place of the weakest one. The literal reading keeps slot 1.
+    fn merge_typos(
+        &self,
+        query: &str,
+        ctx: &Context,
+        limit: usize,
+        results: Vec<String>,
+    ) -> Vec<String> {
+        // How likely the literal reading is: the best completion (or the word itself)
+        let total = self.unigram_total.max(1) as f64;
+        let literal = |w: &str| (self.frequency_of(w).unwrap_or(1).max(1) as f64 / total).ln();
+        let mut best = results.iter().map(|w| literal(w)).fold(f64::MIN, f64::max);
+        if let Some(f) = self.frequency_of(query) {
+            best = best.max((f.max(1) as f64 / total).ln() + EXACT_WORD_BONUS);
+        }
+        if best == f64::MIN {
+            // Nothing the letters typed could literally become: corrections are all there is
+            let typos = self.typo_candidates(query, ctx, 0, true);
+            return typos.into_iter().take(limit).map(|(w, _)| w).collect();
+        }
+        let short = (6usize.saturating_sub(query.chars().count())) as f64;
+        let bar = best + LITERAL_BONUS + SHORT_QUERY_BONUS * short;
+        let show = bar - self.typo_show_margin.max(0.0);
+        // A correction must reach `show` after paying for at least the cheapest slip (and gets up
+        // to a 1.8x lift from the letters it shares), so rarer words are not worth looking at
+        let floor = (show + TYPO_PENALTY * 0.5 - 0.6).exp() * total;
+        let typos = self.typo_candidates(query, ctx, floor as u64, false);
+        if results.is_empty() {
+            // A complete word with nothing after it: only fairly likely corrections of it show
+            return typos
+                .into_iter()
+                .filter(|(_, s)| *s > show)
+                .take(limit)
+                .map(|(w, _)| w)
+                .collect();
+        }
+        let mut strong: Vec<String> = Vec::new();
+        let mut plausible: Vec<String> = Vec::new();
+        for (w, s) in typos {
+            if s > bar {
+                if strong.len() < limit {
+                    strong.push(w);
+                }
+            } else if s > show && plausible.len() < MAX_PLAUSIBLE_TYPOS {
+                plausible.push(w);
+            }
+        }
+        let mut merged = strong;
+        merged.truncate(limit);
+        let lead = merged.len();
+        for r in results {
+            if merged.len() >= limit {
+                break;
+            }
+            if !merged.contains(&r) {
+                merged.push(r);
+            }
+        }
+        // Slot 1 stays with whatever leads (the strong corrections, else the best literal)
+        if limit >= 2 {
+            let mut at = lead + 1;
+            for p in plausible {
+                if merged.contains(&p) {
+                    continue;
+                }
+                let slot = at.min(limit - 1);
+                merged.insert(slot.min(merged.len()), p);
+                merged.truncate(limit);
+                at += 1;
+            }
+        }
+        merged
     }
 }
 
@@ -1744,6 +1976,47 @@ mod tests {
     }
 
     #[test]
+    fn test_typo_beats_a_rare_literal_completion() {
+        let dict = Dictionary::embedded();
+        let ctx = Context::default();
+        // "teh" literally starts "Tehran", but "the" is vastly likelier
+        assert_eq!(dict.suggest("teh", &ctx, 3)[0], "the");
+        assert_eq!(dict.suggest("exmap", &ctx, 3)[0], "example");
+        assert_eq!(dict.suggest("definately", &ctx, 3)[0], "definitely");
+    }
+
+    #[test]
+    fn test_typo_never_hijacks_a_real_prefix() {
+        let dict = Dictionary::embedded();
+        let ctx = Context::default();
+        for typed in ["lim", "comm", "dom", "colu", "nat", "exampl", "kafk"] {
+            let got = dict.suggest(typed, &ctx, 3);
+            assert!(
+                got.first()
+                    .is_some_and(|w| w.to_lowercase().starts_with(typed)),
+                "{typed} -> {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_typo_correction_is_off_inside_identifiers() {
+        let dict = Dictionary::embedded();
+        assert!(
+            dict.suggest_with("teh", &Context::default(), 3, false)[0]
+                .to_lowercase()
+                .starts_with("teh")
+        );
+    }
+
+    #[test]
+    fn test_context_breaks_a_tie_between_corrections() {
+        let dict = Dictionary::embedded();
+        let ctx = Context::new(Some("forward".into()), Some("looking".into()));
+        assert_eq!(dict.suggest("tp", &ctx, 3)[0], "to");
+    }
+
+    #[test]
     fn test_offensive_words_are_filtered() {
         let text = "shirt 900\nshit 5000\nshitty 800\nshine 700\ncocktail 600\ncock 650";
         let mut dict = Dictionary::from_frequency_text(text);
@@ -1903,6 +2176,155 @@ mod tests {
                         assert!(fast > max_dist, "{q:?} vs {w:?}: {fast} <= {max_dist}");
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod typo_tests {
+    use super::*;
+    use std::sync::OnceLock;
+
+    fn embedded() -> &'static Dictionary {
+        static DICT: OnceLock<Dictionary> = OnceLock::new();
+        DICT.get_or_init(Dictionary::embedded)
+    }
+
+    #[test]
+    fn a_plausible_correction_shows_after_the_literal_completion() {
+        let dict = embedded();
+        // "embarass" literally completes to "embarassing"; the right word is offered beside it
+        let got = dict.suggest("embarass", &Context::default(), 3);
+        assert_eq!(got[0], "embarassing", "{got:?}");
+        assert!(got[1..].contains(&"embarrassing".to_string()), "{got:?}");
+        // "wich": the literal reading (Wichita) keeps slot 1, "with" gets a slot after it
+        let got = dict.suggest("wich", &Context::default(), 3);
+        assert_eq!(got[0], "Wichita", "{got:?}");
+        assert!(got[1..].contains(&"with".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn a_strong_correction_goes_first() {
+        let got = embedded().suggest("teh", &Context::default(), 3);
+        assert_eq!(got[0], "the", "{got:?}");
+    }
+
+    #[test]
+    fn a_capitalized_name_mid_sentence_is_not_corrected_away() {
+        let dict = embedded();
+        let ctx = Context::new(Some("with".into()), Some("lunch".into()));
+        for name in ["London", "Alice", "Obama"] {
+            let got = dict.suggest(name, &ctx, 3);
+            for g in &got {
+                assert!(
+                    g.to_lowercase().starts_with(&name.to_lowercase()),
+                    "{name} -> {got:?}"
+                );
+            }
+        }
+        let got = dict.suggest("Lond", &ctx, 3);
+        assert_eq!(got[0], "London", "{got:?}");
+    }
+
+    #[test]
+    fn a_word_from_the_user_dictionary_is_not_displaced() {
+        let mut dict = Dictionary::embedded();
+        // What main does for each line of words.txt
+        dict.insert("zorbla", 50_000_000);
+        dict.allow_word("zorbla");
+        dict.set_spelling("Zorbla");
+        dict.rebuild_caches();
+        let ctx = Context::default();
+        assert_eq!(dict.suggest("zorbl", &ctx, 3)[0], "Zorbla");
+        let whole = dict.suggest("Zorbla", &ctx, 3);
+        assert!(
+            whole.iter().all(|w| w.to_lowercase().starts_with("zorbla")),
+            "{whole:?}"
+        );
+        // And a slip in it is pulled back to it
+        assert!(
+            dict.suggest("zorbal", &ctx, 3)
+                .contains(&"Zorbla".to_string())
+        );
+    }
+
+    #[test]
+    fn odd_input_does_not_panic() {
+        let dict = embedded();
+        let ctx = Context::default();
+        for typed in [
+            "caf\u{e9}",
+            "na\u{ef}ve",
+            "\u{4f60}\u{597d}",
+            "\u{1f600}x",
+            "stra\u{df}e",
+            "\u{130}stanbul",
+            "ab\u{301}c",
+            "'",
+            "--",
+            "9x",
+        ] {
+            let _ = dict.suggest(typed, &ctx, 3);
+        }
+    }
+
+    #[test]
+    fn long_typed_text_is_safe_and_fast() {
+        let dict = embedded();
+        let ctx = Context::default();
+        for len in [31usize, 32, 33, 40, 64, 500] {
+            let typed = "supercalifragilistic".repeat(len / 20 + 1)[..len].to_string();
+            let start = std::time::Instant::now();
+            let _ = dict.suggest(&typed, &ctx, 3);
+            let _ = dict.suggest(&format!("{}x", &typed[..len - 1]), &ctx, 3);
+            let took = start.elapsed();
+            assert!(took.as_millis() < 250, "{len} chars took {took:?}");
+        }
+    }
+
+    /// A fixed slice of the eval set: typos land on the right word, and correct input is left alone
+    #[test]
+    fn typo_eval_subset_meets_its_floor() {
+        let dict = embedded();
+        let ctx = Context::default();
+        let (mut n, mut top1, mut top3) = (0, 0, 0);
+        for line in include_str!("../data/typo_eval.tsv").lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            if line.starts_with('#') || f.len() < 3 || f[2] != "w" {
+                continue;
+            }
+            let got: Vec<String> = dict
+                .suggest(f[0], &ctx, 3)
+                .iter()
+                .map(|w| w.to_lowercase())
+                .collect();
+            n += 1;
+            top1 += (got.first().map(String::as_str) == Some(f[1])) as usize;
+            top3 += got.iter().any(|w| w == f[1]) as usize;
+        }
+        assert!(n >= 200, "{n}");
+        assert!(top1 * 100 >= n * 80, "top-1 {top1}/{n}");
+        assert!(top3 * 100 >= n * 90, "top-3 {top3}/{n}");
+
+        // The 600 most common words and a prefix of each: whatever the literal reading put
+        // first still comes first
+        let mut off = Dictionary::embedded();
+        off.set_typo_correction(false);
+        let vocab: Vec<&str> = include_str!("../data/en_50k.txt")
+            .lines()
+            .filter_map(|l| l.split_whitespace().next())
+            .take(600)
+            .filter(|w| w.len() >= 3 && w.chars().all(|c| c.is_ascii_lowercase()))
+            .collect();
+        for w in vocab {
+            for typed in [w, &w[..w.len() - 1]] {
+                if typed.len() < 3 {
+                    continue;
+                }
+                let base = off.suggest(typed, &ctx, 3);
+                let got = dict.suggest(typed, &ctx, 3);
+                assert_eq!(base.first(), got.first(), "{typed}: {base:?} -> {got:?}");
             }
         }
     }
