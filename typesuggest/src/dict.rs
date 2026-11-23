@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::typo;
+
 #[derive(Debug, Clone, Default)]
 pub struct WordCandidate {
     pub word: String,
@@ -67,6 +69,12 @@ pub struct Dictionary {
     learn_enabled: bool,
     // Fall back to similar words (typo correction) when no word starts with the prefix
     typo_correction: bool,
+    // Prototype switch for the typo-fallback experiments (0 = shipped behaviour)
+    typo_mode: u8,
+    // Indices into `words` by first letter (frequency order), the anchor of the fast typo scan
+    by_first_letter: HashMap<char, Vec<u32>>,
+    // SymSpell-style delete keys of word prefixes: (hash, index into words), sorted
+    sym_keys: Vec<(u32, u32)>,
     // Profanity, sexual slang and slurs (data/blocked_words.txt), never suggested while
     // `filter_offensive` is on
     blocked: HashSet<String>,
@@ -169,6 +177,16 @@ const NAME_FREQUENCY: u64 = 100;
 /// a word that unigram frequency alone would not have put in front of the user.
 const UNIGRAM_POOL: usize = 15;
 
+/// Prototype weights (natural-log units): one full edit is worth this many nats of probability
+const TYPO_PENALTY: f64 = 4.5;
+/// Head start for what the letters typed literally complete to
+const TYPO_SHORTLIST: usize = 24;
+/// Extra head start per letter a query is short of six: "lim" is far likelier a real start than "teh"
+const SHORT_QUERY_BONUS: f64 = 1.0;
+const LITERAL_BONUS: f64 = 2.0;
+/// Extra head start when the typed text is itself a dictionary word
+const EXACT_WORD_BONUS: f64 = 2.0;
+
 impl Default for Dictionary {
     fn default() -> Self {
         Self::new()
@@ -191,6 +209,9 @@ impl Dictionary {
             names_only: HashSet::new(),
             learn_enabled: true,
             typo_correction: true,
+            typo_mode: 4,
+            by_first_letter: HashMap::new(),
+            sym_keys: Vec::new(),
             blocked: HashSet::new(),
             filter_offensive: true,
             ranking: Ranking::default(),
@@ -208,6 +229,13 @@ impl Dictionary {
 
     pub fn is_learning_enabled(&self) -> bool {
         self.learn_enabled
+    }
+
+    pub fn set_typo_mode(&mut self, mode: &str) {
+        self.typo_mode = mode.parse().unwrap_or(0);
+        if self.typo_mode == 4 && self.sym_keys.is_empty() {
+            self.build_sym_keys();
+        }
     }
 
     pub fn set_typo_correction(&mut self, enabled: bool) {
@@ -655,6 +683,13 @@ impl Dictionary {
         self.words = Self::rebuild_node_cache(&mut self.root, "");
         self.word_letters = self.words.iter().map(|w| letter_bits(&w.word)).collect();
         self.unigram_total = self.words.iter().map(|w| w.frequency).sum();
+        self.build_sym_keys();
+        self.by_first_letter.clear();
+        for (i, w) in self.words.iter().enumerate() {
+            if let Some(c) = w.word.chars().next() {
+                self.by_first_letter.entry(c).or_default().push(i as u32);
+            }
+        }
     }
 
     fn rebuild_node_cache(node: &mut TrieNode, current_prefix: &str) -> Vec<WordCandidate> {
@@ -812,21 +847,25 @@ impl Dictionary {
             .map(|(_, word)| word.clone())
             .collect();
 
-        // 4. If exact prefix matching yielded NO candidates, fall back to similarity search!
-        //    The vocabulary is English, so only queries containing Latin letters can be near a word
+        // 4. Typo fallback
         if self.typo_correction
             && whole_word
-            && results.is_empty()
-            && lower_prefix.len() >= 2
+            && lower_prefix.chars().count() >= 2
             && lower_prefix.chars().any(|c| c.is_ascii_alphabetic())
         {
-            for cand in self.suggest_similar(&lower_prefix, ctx, limit) {
-                if cand != lower_prefix && !results.contains(&cand) && !self.is_blocked(&cand) {
-                    results.push(cand);
-                    if results.len() >= limit {
-                        break;
+            if self.typo_mode == 0 {
+                if results.is_empty() {
+                    for cand in self.suggest_similar(&lower_prefix, ctx, limit) {
+                        if cand != lower_prefix && !results.contains(&cand) && !self.is_blocked(&cand) {
+                            results.push(cand);
+                            if results.len() >= limit {
+                                break;
+                            }
+                        }
                     }
                 }
+            } else {
+                results = self.merge_typos(&lower_prefix, ctx, limit, results);
             }
         }
 
@@ -901,6 +940,320 @@ impl Dictionary {
             score += self.ranking.learned_bonus;
         }
         score
+    }
+
+    /// Typo candidates for `query`, best first, each with `ln(probability) - TYPO_PENALTY * edits`.
+    fn typo_candidates(&self, query: &str, ctx: &Context, min_freq: u64) -> Vec<(String, f64)> {
+        let q: Vec<char> = query.chars().collect();
+        let q_len = q.len();
+        let cap = typo::cap_for(q_len);
+        let max_missing = (cap / 10) as usize;
+        let mut found: Vec<(u32, u16)> = Vec::new(); // (index into words, distance)
+        let mut extra: Vec<(String, u16)> = Vec::new(); // followers named by the context tables
+
+        let mut w_chars: Vec<char> = Vec::with_capacity(40);
+        let check = |idx: usize, found: &mut Vec<(u32, u16)>, w_chars: &mut Vec<char>| {
+            let item = &self.words[idx];
+            let w_len = item.word.len();
+            if item.frequency < min_freq {
+                return;
+            }
+            if w_len + max_missing < q_len || w_len > q_len + 10 {
+                return;
+            }
+            let letters = self.word_letters[idx];
+            let missing = q.iter().filter(|&&c| letters & letter_bit(c) == 0).count();
+            if missing > max_missing {
+                return;
+            }
+            w_chars.clear();
+            w_chars.extend(item.word.chars());
+            let dist = typo::weighted_prefix_distance(&q, w_chars, cap);
+            if dist <= cap {
+                found.push((idx as u32, dist));
+            }
+        };
+
+        if self.typo_mode == 4 && q_len >= 3 {
+            let mut ids = Vec::new();
+            self.sym_lookup(&q, &mut ids);
+            for idx in ids {
+                check(idx as usize, &mut found, &mut w_chars);
+            }
+        } else if self.typo_mode == 3 {
+            let mut best: HashMap<&str, u16> = HashMap::new();
+            let mut rows: Vec<[u16; 34]> = vec![[0u16; 34]; q_len + 4];
+            let mut path: Vec<char> = Vec::with_capacity(q_len + 4);
+            for i in 1..=q_len {
+                let del = if i >= 2 && q[i - 1] == q[i - 2] { typo::DOUBLE } else { typo::FULL };
+                let del = if i == 1 { del + typo::FIRST_LETTER_EXTRA } else { del };
+                rows[0][i] = rows[0][i - 1] + del;
+            }
+            self.trie_walk(&self.root, &q, cap, min_freq, &mut rows, &mut path, &mut best);
+            for (w, d) in best {
+                extra.push((w.to_string(), d));
+            }
+        } else if self.typo_mode == 2 {
+            for idx in 0..self.words.len() {
+                check(idx, &mut found, &mut w_chars);
+            }
+        } else {
+            // People rarely slip on the first letter, so scan the words that start with the first
+            // letter typed, or with the second one (a swapped or extra first letter)
+            let mut firsts = vec![q[0]];
+            if q_len > 1 && q[1] != q[0] {
+                firsts.push(q[1]);
+            }
+            for f in firsts {
+                if let Some(bucket) = self.by_first_letter.get(&f) {
+                    for &idx in bucket {
+                        // Frequency order: nothing after this can reach `min_freq`
+                        if self.words[idx as usize].frequency < min_freq {
+                            break;
+                        }
+                        check(idx as usize, &mut found, &mut w_chars);
+                    }
+                }
+            }
+        }
+
+        if let Some(prev) = &ctx.prev {
+            let mut lists: Vec<&Vec<(String, u32)>> = Vec::new();
+            if let Some(pp) = &ctx.prev_prev
+                && let Some(f) = self.trigrams.get(&(pp.clone(), prev.clone()))
+            {
+                lists.push(f);
+            }
+            if let Some(f) = self.user_bigrams.get(prev) {
+                lists.push(f);
+            }
+            if let Some(f) = self.bigrams.get(prev) {
+                lists.push(f);
+            }
+            for list in lists {
+                for (follower, _) in list {
+                    w_chars.clear();
+                    w_chars.extend(follower.chars());
+                    let dist = typo::weighted_prefix_distance(&q, &w_chars, cap);
+                    if dist <= cap {
+                        extra.push((follower.clone(), dist));
+                    }
+                }
+            }
+        }
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut scored: Vec<(String, f64)> = Vec::new();
+        let mut consider = |word: &str, dist: u16, scored: &mut Vec<(String, f64)>| {
+            if word == query || !seen.insert(word.to_string()) || self.is_blocked(word) {
+                return;
+            }
+            let ev = self.evidence_of(word, ctx);
+            let p = self.score(word, query, ctx, ev).max(1e-12);
+            scored.push((word.to_string(), p.ln() - TYPO_PENALTY * f64::from(dist) / 10.0));
+        };
+        // Full scoring (context lookups) is dear, so only the best few by frequency and distance get it
+        if found.len() > TYPO_SHORTLIST {
+            let rough = |&(idx, dist): &(u32, u16)| {
+                (self.words[idx as usize].frequency.max(1) as f64).ln()
+                    - TYPO_PENALTY * f64::from(dist) / 10.0
+            };
+            found.select_nth_unstable_by(TYPO_SHORTLIST, |a, b| rough(b).total_cmp(&rough(a)));
+            found.truncate(TYPO_SHORTLIST);
+        }
+        for &(idx, dist) in &found {
+            consider(&self.words[idx as usize].word, dist, &mut scored);
+        }
+        for (word, dist) in &extra {
+            consider(word, *dist, &mut scored);
+        }
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored
+    }
+
+    fn sym_hash(chars: &[char], skip: usize) -> u32 {
+        let mut h: u32 = 0x811c_9dc5 ^ (chars.len() as u32);
+        for (i, &c) in chars.iter().enumerate() {
+            if i == skip {
+                continue;
+            }
+            h = (h ^ c as u32).wrapping_mul(0x0100_0193);
+        }
+        h ^ (h >> 15)
+    }
+
+    /// Keys for the first 3..=6 letters of every word: the prefix itself and each way to delete one letter
+    pub fn build_sym_keys(&mut self) {
+        let mut keys: Vec<(u32, u32)> = Vec::with_capacity(self.words.len() * 22);
+        for (idx, item) in self.words.iter().enumerate() {
+            let chars: Vec<char> = item.word.chars().take(6).collect();
+            let full = item.word.chars().count();
+            for l in 3..=6usize {
+                if l > full {
+                    break;
+                }
+                let pre = &chars[..l];
+                keys.push((Self::sym_hash(pre, usize::MAX), idx as u32));
+                for skip in 0..l {
+                    keys.push((Self::sym_hash(&pre[..l], skip), idx as u32));
+                }
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        keys.shrink_to_fit();
+        self.sym_keys = keys;
+    }
+
+    fn sym_lookup(&self, q: &[char], out: &mut Vec<u32>) {
+        let m = q.len().min(5);
+        let pre = &q[..m];
+        let mut probe = |h: u32| {
+            let start = self.sym_keys.partition_point(|&(k, _)| k < h);
+            for &(k, idx) in &self.sym_keys[start..] {
+                if k != h {
+                    break;
+                }
+                out.push(idx);
+            }
+        };
+        probe(Self::sym_hash(pre, usize::MAX));
+        for skip in 0..m {
+            probe(Self::sym_hash(pre, skip));
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trie_walk<'a>(
+        &'a self,
+        node: &'a TrieNode,
+        q: &[char],
+        cap: u16,
+        min_freq: u64,
+        rows: &mut Vec<[u16; 34]>,
+        path: &mut Vec<char>,
+        best: &mut HashMap<&'a str, u16>,
+    ) {
+        let ql = q.len();
+        let j = path.len();
+        if j >= ql + 2 {
+            return;
+        }
+        let prev_min = rows[j][..=ql].iter().copied().min().unwrap_or(0);
+        for (&c, child) in &node.children {
+            if child.top_candidates.first().is_none_or(|t| t.frequency < min_freq) {
+                continue;
+            }
+            let nj = j + 1;
+            let ins = if j >= 1 && path[j - 1] == c { typo::DOUBLE } else { typo::FULL };
+            let ins = if nj == 1 { ins + typo::FIRST_LETTER_EXTRA } else { ins };
+            let mut row = [0u16; 34];
+            row[0] = rows[j][0] + ins;
+            let mut row_min = row[0];
+            for i in 1..=ql {
+                let mut sub = typo::sub_cost(q[i - 1], c);
+                if sub > 0 && i == 1 && nj == 1 {
+                    sub += typo::FIRST_LETTER_EXTRA;
+                }
+                let del = if i >= 2 && q[i - 1] == q[i - 2] { typo::DOUBLE } else { typo::FULL };
+                let del = if i == 1 { del + typo::FIRST_LETTER_EXTRA } else { del };
+                let mut v = (rows[j][i - 1] + sub)
+                    .min(row[i - 1] + del)
+                    .min(rows[j][i] + ins);
+                if i > 1 && nj > 1 && q[i - 1] == path[j - 1] && q[i - 2] == c {
+                    v = v.min(rows[j - 1][i - 2] + typo::SWAP);
+                }
+                row[i] = v;
+                row_min = row_min.min(v);
+            }
+            if row_min > cap && prev_min > cap {
+                continue;
+            }
+            if nj + 2 >= ql && row[ql] <= cap {
+                for cand in &child.top_candidates {
+                    let e = best.entry(cand.word.as_str()).or_insert(u16::MAX);
+                    *e = (*e).min(row[ql]);
+                }
+            }
+            rows[nj] = row;
+            path.push(c);
+            self.trie_walk(child, q, cap, min_freq, rows, path, best);
+            path.pop();
+        }
+    }
+
+    /// What the context tables say about `word` after `ctx`
+    fn evidence_of(&self, word: &str, ctx: &Context) -> Evidence {
+        let mut ev = Evidence::default();
+        if let Some(prev) = &ctx.prev {
+            if let Some(pp) = &ctx.prev_prev
+                && let Some(f) = self.trigrams.get(&(pp.clone(), prev.clone()))
+                && let Some((_, c)) = f.iter().find(|(w, _)| w == word)
+            {
+                ev.trigram = *c;
+            }
+            if self.learn_enabled
+                && let Some(f) = self.user_bigrams.get(prev)
+                && let Some((_, c)) = f.iter().find(|(w, _)| w == word)
+            {
+                ev.user = *c;
+            }
+            if let Some(f) = self.bigrams.get(prev)
+                && let Some((_, c)) = f.iter().find(|(w, _)| w == word)
+            {
+                ev.bigram = *c;
+            }
+        }
+        ev
+    }
+
+    /// Put typo corrections into `results` (the prefix completions of `query`). With no completion
+    /// at all they are all there is; otherwise a correction goes first only when it is much more
+    /// probable than what the letters typed would literally complete to ("teh" -> "the", not "Tehran")
+    fn merge_typos(
+        &self,
+        query: &str,
+        ctx: &Context,
+        limit: usize,
+        results: Vec<String>,
+    ) -> Vec<String> {
+        if results.is_empty() {
+            let typos = self.typo_candidates(query, ctx, 0);
+            return typos.into_iter().take(limit).map(|(w, _)| w).collect();
+        }
+        // How likely the literal reading is: the best completion (or the word itself)
+        let total = self.unigram_total.max(1) as f64;
+        let literal = |w: &str| (self.frequency_of(w).unwrap_or(1).max(1) as f64 / total).ln();
+        let mut best = results.iter().map(|w| literal(w)).fold(f64::MIN, f64::max);
+        if let Some(f) = self.frequency_of(query) {
+            best = best.max((f.max(1) as f64 / total).ln() + EXACT_WORD_BONUS);
+        }
+        let short = (6usize.saturating_sub(query.chars().count())) as f64;
+        let bar = best + LITERAL_BONUS + SHORT_QUERY_BONUS * short;
+        // A correction must beat `bar` after paying for at least the cheapest slip (and gets up
+        // to a 1.8x lift from the letters it shares), so rarer words are not worth looking at
+        let floor = (bar + TYPO_PENALTY * 0.5 - 0.6).exp() * total;
+        let typos = self.typo_candidates(query, ctx, floor as u64);
+        if typos.is_empty() {
+            return results;
+        }
+        let mut merged: Vec<String> = Vec::new();
+        for (w, s) in typos {
+            if s > bar && merged.len() < limit {
+                merged.push(w);
+            }
+        }
+        for r in results {
+            if merged.len() >= limit {
+                break;
+            }
+            if !merged.contains(&r) {
+                merged.push(r);
+            }
+        }
+        merged
     }
 
     /// Find the most similar words when exact prefix matching yields no results
@@ -1741,6 +2094,42 @@ mod tests {
 
         let res_all_caps = dict.suggest("TEH", &Context::default(), 1);
         assert_eq!(res_all_caps, vec!["THE"]);
+    }
+
+    #[test]
+    fn test_typo_beats_a_rare_literal_completion() {
+        let dict = Dictionary::embedded();
+        let ctx = Context::default();
+        // "teh" literally starts "Tehran", but "the" is vastly likelier
+        assert_eq!(dict.suggest("teh", &ctx, 3)[0], "the");
+        assert_eq!(dict.suggest("exmap", &ctx, 3)[0], "example");
+        assert_eq!(dict.suggest("definately", &ctx, 3)[0], "definitely");
+    }
+
+    #[test]
+    fn test_typo_never_hijacks_a_real_prefix() {
+        let dict = Dictionary::embedded();
+        let ctx = Context::default();
+        for typed in ["lim", "comm", "dom", "colu", "nat", "exampl", "kafk"] {
+            let got = dict.suggest(typed, &ctx, 3);
+            assert!(
+                got.first().is_some_and(|w| w.to_lowercase().starts_with(typed)),
+                "{typed} -> {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_typo_correction_is_off_inside_identifiers() {
+        let dict = Dictionary::embedded();
+        assert!(dict.suggest_with("teh", &Context::default(), 3, false)[0].to_lowercase().starts_with("teh"));
+    }
+
+    #[test]
+    fn test_context_breaks_a_tie_between_corrections() {
+        let dict = Dictionary::embedded();
+        let ctx = Context::new(Some("forward".into()), Some("looking".into()));
+        assert_eq!(dict.suggest("tp", &ctx, 3)[0], "to");
     }
 
     #[test]
